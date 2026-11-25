@@ -93,7 +93,9 @@ comparison to random positions and tablebase probing. See [CONTRIBUTING.md](CONT
   implemented there.
 * Not ported: the RISC-V vector, LoongArch and PowerPC kernels. Other targets use the scalar code.
 
-The library API is not stable; the crate is meant to be used as an engine binary.
+The library API is not stable; the crate is meant to be used as an engine binary. As in
+Stockfish, tablebase files are memory-mapped and must not be modified while the engine runs,
+and engines of the same user share one copy of the network weights in memory.
 
 ## License
 

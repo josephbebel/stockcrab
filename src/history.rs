@@ -168,22 +168,20 @@ const _: () = assert!(
         == CELLS_PER_PAWN_ENTRY * core::mem::size_of::<AtomicI16>()
 );
 
-/// Sets `n` consecutive `i16` cells starting at `first` to `value` with plain stores, which the
-/// compiler turns into wide vector stores (a loop of relaxed atomic stores stays one 2-byte store
-/// per entry, several times slower on the 25 MB of tables `Worker::clear` rewrites).
+/// Sets `n` consecutive `AtomicI16` cells starting at `first` to `value` with relaxed stores, so
+/// a clear that overlaps a search or another clear is a logic error, not a data race.
 ///
 /// # Safety
 ///
 /// `first..first + n` must lie inside one allocation of `AtomicI16`-backed cells (an
-/// `AtomicStatsEntry`, or a `CorrectionBundle`, which is `repr(C)` over four of them), and no other
-/// thread may read or write those cells concurrently (callers clear disjoint ranges per thread).
+/// `AtomicStatsEntry`, or a `CorrectionBundle`, which is `repr(C)` over four of them).
 #[inline]
 unsafe fn fill_cells(first: *const AtomicI16, n: usize, value: i16) {
-    let first = first.cast_mut().cast::<i16>();
-    for i in 0..n {
-        // SAFETY: in bounds and unshared by the caller's contract; an `AtomicI16` has the size and
-        // alignment of an `i16` (and `UnsafeCell` makes writing through a shared reference legal).
-        unsafe { first.add(i).write(value) };
+    // SAFETY: the caller guarantees the range is `n` initialised `AtomicI16`s in one allocation;
+    // shared references to atomics may coexist with any other access to them.
+    let cells = unsafe { core::slice::from_raw_parts(first, n) };
+    for cell in cells {
+        cell.store(value, Ordering::Relaxed);
     }
 }
 
@@ -249,6 +247,17 @@ fn zeroed_vec<T: Zeroable>(n: usize) -> Vec<T> {
 // Shared between threads on a NUMA node
 // ---------------------------------------------------------------------------
 
+/// `thread_count` (at least 1) rounded up to a power of two, times `base` (a power of two): a
+/// non-zero power of two, so that `key & (size - 1)` is always in bounds. Panics on overflow.
+fn shared_table_size(thread_count: usize, base: usize) -> usize {
+    debug_assert!(base.is_power_of_two());
+    thread_count
+        .max(1)
+        .checked_next_power_of_two()
+        .and_then(|n| n.checked_mul(base))
+        .expect("shared history size overflows")
+}
+
 /// Shared pawn history: Vec of atomic pawn history entries
 pub struct SharedPawnHistory {
     data: Vec<AtomicPawnHistoryEntry>,
@@ -259,7 +268,7 @@ impl SharedPawnHistory {
     pub fn new(thread_count: usize) -> Self {
         // The size must be a power of two so that `key & (size - 1)` is always in bounds
         // (`SharedHistories` relies on it for unchecked lookups); round a stray thread count up.
-        let size = thread_count.max(1).next_power_of_two() * PAWN_HISTORY_BASE_SIZE;
+        let size = shared_table_size(thread_count, PAWN_HISTORY_BASE_SIZE);
         let data: Vec<AtomicPawnHistoryEntry> = zeroed_vec(size);
         SharedPawnHistory { data, size }
     }
@@ -308,7 +317,7 @@ pub struct SharedCorrectionHistory {
 impl SharedCorrectionHistory {
     pub fn new(thread_count: usize) -> Self {
         // Power-of-two size: see `SharedPawnHistory::new`.
-        let size = thread_count.max(1).next_power_of_two() * CORRHIST_BASE_SIZE;
+        let size = shared_table_size(thread_count, CORRHIST_BASE_SIZE);
         let data: Vec<UnifiedCorrectionEntry> = zeroed_vec(size);
         SharedCorrectionHistory { data, size }
     }
@@ -352,11 +361,12 @@ impl core::ops::IndexMut<usize> for SharedCorrectionHistory {
 /// To avoid excessive cross-node data transfer, histories are shared
 /// only between threads on a given NUMA node.
 pub struct SharedHistories {
-    pub correction_history: SharedCorrectionHistory,
+    // Private: the lookups mask keys with sizes cached below, so the tables must not be replaced.
+    correction_history: SharedCorrectionHistory,
     /// Continuation history is thread-shared and lives here (it is built on the
     /// atomic PieceToHistory). Indexed by \[in_check\]\[capture\].
     pub continuation_history_block: LargePageContinuationHistory,
-    pub pawn_history: SharedPawnHistory,
+    pawn_history: SharedPawnHistory,
     size_minus_1: usize,
     pawn_hist_size_minus_1: usize,
 }
@@ -388,17 +398,11 @@ impl SharedHistories {
     /// Sets every entry of the four continuation-history tables to `value`
     /// (C++ `continuationHistory[inCheck][capture].fill(value)`). Only for the thread that owns
     /// the initialization of this block, while no search is running.
-    ///
-    /// # Safety
-    ///
-    /// No other thread may read or write the continuation-history block while this runs (the
-    /// stores are plain, not atomic).
-    pub unsafe fn fill_continuation_history(&self, value: i16) {
+    pub fn fill_continuation_history(&self, value: i16) {
         const CELLS: usize =
             core::mem::size_of::<ContinuationHistoryBlock>() / core::mem::size_of::<AtomicI16>();
         // SAFETY: the block is `repr(C)` over nothing but `AtomicI16`-backed entries (`CELLS` of
-        // them, checked below) and `table` borrows all of it, so the pointer covers the range; the
-        // caller guarantees that nothing accesses the block concurrently.
+        // them, checked below) and `table` borrows all of it, so the pointer covers the range.
         unsafe {
             fill_cells(
                 core::ptr::from_ref(&self.continuation_history_block.table).cast::<AtomicI16>(),
@@ -406,6 +410,18 @@ impl SharedHistories {
                 value,
             );
         }
+    }
+
+    /// The correction-history table (bounds-checked `Index`).
+    #[inline]
+    pub fn correction_history(&self) -> &SharedCorrectionHistory {
+        &self.correction_history
+    }
+
+    /// The pawn-history table (bounds-checked `Index`).
+    #[inline]
+    pub fn pawn_history(&self) -> &SharedPawnHistory {
+        &self.pawn_history
     }
 
     /// Access the NUMA-local continuation-history block.
@@ -467,14 +483,8 @@ impl SharedHistories {
     /// The fill values are parameters (as in C++) so upstream retunes are a call-site edit.
     ///
     /// Fills this thread's partition of the correction and pawn tables with `correction_value`
-    /// and `pawn_value` respectively.
-    ///
-    /// # Safety
-    ///
-    /// No other thread may read or write this thread's partition of the tables while this runs
-    /// (the stores are plain, not atomic), and `thread_idx < numa_total` must hold; concurrent
-    /// calls must use distinct `thread_idx` values of the same `numa_total`.
-    pub unsafe fn clear_range(
+    /// and `pawn_value` respectively. Panics unless `thread_idx < numa_total`.
+    pub fn clear_range(
         &self,
         correction_value: i16,
         pawn_value: i16,
@@ -496,7 +506,7 @@ impl SharedHistories {
         if corr_start < corr_end {
             // SAFETY: `thread_idx < numa_total` (asserted), so `corr_start < corr_end <= corr_size`
             // and the range is inside the table; the cells are `repr(C)` bundles of `AtomicI16`
-            // (four per entry) and the caller guarantees exclusive access to the range.
+            // (four per entry).
             unsafe {
                 let first = self
                     .correction_history
@@ -523,7 +533,7 @@ impl SharedHistories {
         if pawn_start < pawn_end {
             // SAFETY: `thread_idx < numa_total` (asserted), so `pawn_start < pawn_end <= pawn_size`
             // and the range is inside the table; each entry is `PIECE_NB * SQUARE_NB` transparent
-            // `AtomicI16` cells, and the caller guarantees exclusive access to the range.
+            // `AtomicI16` cells,.
             unsafe {
                 let first = self
                     .pawn_history
@@ -889,8 +899,7 @@ mod tests {
         for numa_total in 1..=4usize {
             let h = SharedHistories::new(1);
             for thread_idx in 0..numa_total {
-                // SAFETY: nothing else touches `h`; partitions are disjoint.
-                unsafe { h.clear_range(-5, -1338, thread_idx, numa_total) };
+                h.clear_range(-5, -1338, thread_idx, numa_total);
             }
             for bundle in h.correction_history.data.iter() {
                 for cell in [
@@ -916,7 +925,6 @@ mod tests {
     #[should_panic(expected = "invalid NUMA partition")]
     fn clear_range_rejects_out_of_range_thread_index() {
         let h = SharedHistories::new(1);
-        // SAFETY: the call panics before touching any table.
-        unsafe { h.clear_range(-5, -1338, 2, 2) };
+        h.clear_range(-5, -1338, 2, 2);
     }
 }

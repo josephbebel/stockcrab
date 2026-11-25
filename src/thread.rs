@@ -1575,6 +1575,20 @@ pub struct ThreadPool {
     numa_config: Arc<NumaConfig>,
 }
 
+/// The root position as handed to the search threads, each of which clones it. `Position` is not
+/// `Sync` (its threat cache is filled through `&self`), so this wrapper offers nothing but a clone.
+struct SharedRoot(Position);
+
+impl SharedRoot {
+    fn clone_position(&self) -> Position {
+        self.0.clone()
+    }
+}
+
+// SAFETY: the only access through `&SharedRoot` is `Position::clone`, which reads the position
+// (the threat cache's `Cell` included) and writes nothing, so concurrent clones cannot race.
+unsafe impl Sync for SharedRoot {}
+
 impl ThreadPool {
     pub fn new() -> Self {
         Self {
@@ -1930,10 +1944,10 @@ impl ThreadPool {
 
         // Give every worker its own copy of the root position and its history, so a later
         // position command cannot affect a running search.
-        let root_position = Arc::new(pos.clone());
+        let root_position = Arc::new(SharedRoot(pos.clone()));
         let tb_config = match options.read() {
             Ok(opt) => {
-                let mut probe_pos = (*root_position).clone();
+                let mut probe_pos = root_position.clone_position();
                 let cfg =
                     crate::syzygy::rank_root_moves(&opt, &mut probe_pos, &mut root_moves, false);
                 TablebaseConfig {
@@ -1970,7 +1984,7 @@ impl ThreadPool {
                     w.counters.best_move_changes.store(0, Ordering::Relaxed);
                     w.root_depth = 0;
                     w.root_moves = (*root_moves_clone).clone();
-                    w.root_pos = (*root_position_clone).clone();
+                    w.root_pos = root_position_clone.clone_position();
                     w.tb_config = tb_config_clone;
                 }
             });

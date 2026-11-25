@@ -124,7 +124,7 @@ impl PP_3Wide {
     /// Every pawn is "updated", so each unordered pair is emitted exactly once by
     /// `append_indices_impl`.
     #[inline(never)]
-    pub fn append_active_indices(
+    pub(crate) fn append_active_indices(
         perspective: Color,
         pos: &Position,
         active: &mut FeatureIndexList,
@@ -147,7 +147,7 @@ impl PP_3Wide {
     /// regenerated: partners are taken from the unchanged pawns plus the still-unvisited updated
     /// pawns, so a pair with two updated pawns is emitted exactly once.
     #[inline(always)]
-    pub fn append_changed_indices(
+    pub(crate) fn append_changed_indices(
         perspective: Color,
         ksq: Square,
         diff: &DirtyPawnPairs,
@@ -165,7 +165,7 @@ impl PP_3Wide {
     /// Append the changed pawn-pair features for *both* perspectives in a single
     /// pass over the diff (C++ `PP_3Wide::append_changed_indices_both`).
     #[inline(never)]
-    pub fn append_changed_indices_both(
+    pub(crate) fn append_changed_indices_both(
         white_ksq: Square,
         black_ksq: Square,
         diff: &DirtyPawnPairs,

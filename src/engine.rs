@@ -36,7 +36,7 @@ use crate::thread::{
     UpdateContext as ThreadUpdateContext,
 };
 use crate::tt::TranspositionTable;
-use crate::types::{Depth, MAX_MOVES, Move};
+use crate::types::{Depth, MAX_HIST, MAX_MOVES, Move};
 use crate::uci::UciEngine;
 use crate::ucioption::OptionsMap;
 
@@ -491,6 +491,12 @@ impl Engine {
         is_chess960: bool,
     ) -> Result<u64, PositionSetError> {
         self.verify_network();
+
+        if depth >= MAX_HIST as Depth {
+            return Err(PositionSetError::new(format!(
+                "perft depth must be below {MAX_HIST}"
+            )));
+        }
 
         // Create a position for perft calculation
         let mut pos = Position::default();
@@ -1165,7 +1171,7 @@ pub(crate) mod tests {
     fn history_groups_resize_and_use_local_worker_indices() {
         let mut engine = Engine::new(None);
         engine.set_option("name NumaPolicy value none");
-        let base_size = engine.shared_histories.correction_history.get_size();
+        let base_size = engine.shared_histories.correction_history().get_size();
         for count in [1usize, 3, 5, 8] {
             engine.set_option(&format!("name Threads value {count}"));
             let pool = engine.thread_pool_data.read().unwrap();
@@ -1179,7 +1185,7 @@ pub(crate) mod tests {
                 assert_eq!(worker.numa_total, count);
                 let history = &worker.shared_state.shared_histories;
                 assert_eq!(
-                    history.correction_history.get_size(),
+                    history.correction_history().get_size(),
                     base_size * count.next_power_of_two()
                 );
                 if let Some(first) = &group {

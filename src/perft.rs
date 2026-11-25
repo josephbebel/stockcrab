@@ -22,7 +22,7 @@
 
 use crate::movegen::{GenType, generate};
 use crate::position::{Position, PositionSetError, ScopedMove};
-use crate::types::Depth;
+use crate::types::{Depth, MAX_HIST};
 use crate::uci::UciEngine;
 use std::io::{self, Write};
 
@@ -78,7 +78,13 @@ fn perft_internal<const ROOT: bool>(pos: &mut Position, depth: Depth) -> u64 {
 /// Public perft function that counts all leaf nodes up to the given depth.
 /// This is the main entry point for perft testing. Like C++, a depth of 1 or less
 /// (`go perft -1` reaches here) counts the root moves.
+///
+/// Panics unless `depth < MAX_HIST`: deeper lines would outrun the position's state history.
 pub fn perft(pos: &mut Position, depth: Depth) -> u64 {
+    assert!(
+        depth < MAX_HIST as Depth,
+        "perft depth must be below {MAX_HIST}"
+    );
     perft_internal::<true>(pos, depth)
 }
 
@@ -202,8 +208,12 @@ pub fn run_standard_tests(max_depth: Depth) -> bool {
 // DIVIDE COMMAND SUPPORT
 // ---------------------------------------------------------------------------
 
-/// Divide command - shows perft results for each root move
+/// Divide command - shows perft results for each root move. Panics unless `depth < MAX_HIST`.
 pub fn divide(pos: &mut Position, depth: Depth) -> u64 {
+    assert!(
+        depth < MAX_HIST as Depth,
+        "perft depth must be below {MAX_HIST}"
+    );
     if depth <= 0 {
         return 1;
     }

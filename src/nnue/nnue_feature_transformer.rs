@@ -50,15 +50,15 @@ pub const FT_MAX_VAL: i32 = 255;
 #[derive(Clone)]
 pub struct FeatureTransformer {
     /// Biases for the hidden layer - 64-byte aligned for SIMD
-    pub biases: AlignedVec<BiasType>,
+    pub(crate) biases: AlignedVec<BiasType>,
     /// Weights for PSQ feature transformation (SFNNv18: i8) - 64-byte aligned for SIMD
-    pub weights: AlignedVec<WeightType>,
+    pub(crate) weights: AlignedVec<WeightType>,
     /// SFNNv10/SFNNv16: threat + pawn-pair feature weights (i8).
     ///
     /// Threats and pawn-pair features are concatenated into one array so that a
     /// single index addresses either. The first pawn-pair feature is at index
     /// `ThreatFeatureSet::DIMENSIONS` (== `PairFeatureSet::INDEX_BASE`).
-    pub threat_and_pp_weights: AlignedVec<ThreatWeightType>,
+    pub(crate) threat_and_pp_weights: AlignedVec<ThreatWeightType>,
 }
 
 impl FeatureTransformer {

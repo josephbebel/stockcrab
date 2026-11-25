@@ -79,7 +79,7 @@ static mut PAWN_ATTACKS_STORAGE: MaybeUninit<[[Bitboard; SQUARE_NB]; COLOR_NB]> 
 // entry per square, on every target (C++ `DualMagic`, attacks.h): with AVX2 the three line masks
 // are three lanes of one vector, otherwise the scalar kernel handles each line in turn.
 #[repr(C, align(32))]
-#[derive(Clone, Copy, Debug, Default)]
+#[derive(Clone, Copy, Debug)]
 struct DualMagic {
     mask_file: Bitboard,
     mask_diag: Bitboard,
@@ -87,7 +87,7 @@ struct DualMagic {
     mask_none: Bitboard,
     r: Bitboard,
     rr: Bitboard,
-    rank_attacks: usize,
+    rank_attacks: &'static [u8; 64],
     shift: u32,
 }
 
@@ -317,21 +317,19 @@ fn dual_line_mask(sq: Square, first: Direction, second: Direction) -> Bitboard {
 }
 
 fn build_dual_magics() -> AlignedDualMagics {
-    let mut magics = AlignedDualMagics([DualMagic::default(); SQUARE_NB]);
-    for square in 0..SQUARE_NB {
+    AlignedDualMagics(core::array::from_fn(|square| {
         let sq = Square::from(square as u8);
-        magics.0[square] = DualMagic {
+        DualMagic {
             mask_file: dual_line_mask(sq, NORTH, SOUTH),
             mask_diag: dual_line_mask(sq, NORTH_EAST, SOUTH_WEST),
             mask_antidiag: dual_line_mask(sq, NORTH_WEST, SOUTH_EAST),
             mask_none: 0,
             r: (1u64 << square).wrapping_mul(2),
             rr: (1u64 << (63 - square)).wrapping_mul(2),
-            rank_attacks: RANK_ATTACKS[file_of(sq) as usize].as_ptr() as usize,
+            rank_attacks: &RANK_ATTACKS[file_of(sq) as usize],
             shift: (8 * rank_of(sq) as usize) as u32,
-        };
-    }
-    magics
+        }
+    }))
 }
 
 #[inline(always)]
@@ -675,11 +673,7 @@ pub fn attacks_bb_queen(sq: Square, occ: Bitboard) -> Bitboard {
 /// `rankAttacksLookup[(occupied >> (shift + 1)) & 0x3f] << shift`.
 #[inline(always)]
 fn rank_attacks_of(magic: &DualMagic, occupied: Bitboard) -> Bitboard {
-    // SAFETY: `rank_attacks` points to one 64-entry row of the static `RANK_ATTACKS` (set by
-    // `build_dual_magics`), and the index is masked to 0..64.
-    let row = unsafe {
-        *(magic.rank_attacks as *const u8).add(((occupied >> (magic.shift + 1)) & 0x3f) as usize)
-    };
+    let row = magic.rank_attacks[((occupied >> (magic.shift + 1)) & 0x3f) as usize];
     Bitboard::from(row) << magic.shift
 }
 

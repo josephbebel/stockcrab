@@ -29,6 +29,11 @@
 //! gets may have a different number but refers to the same open file, so
 //! `mmap(MAP_SHARED)` on it maps the same physical pages.
 //!
+//! Trust model: the processes sharing a region trust each other. The seals fix the region's size,
+//! but any process holding the descriptor can write to it, and a write while another process
+//! evaluates would change weights under its feet (as in C++). The descriptor is only handed to
+//! peers of the same user, through a 0700 directory.
+//!
 //! The protocol, per region:
 //!
 //! 1. `TempRoot` — `/tmp/stockfish-<uid>`, created 0700 and re-validated on

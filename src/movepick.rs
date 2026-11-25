@@ -26,7 +26,8 @@ use core::ptr::NonNull;
 use crate::bitboard_fast::square_bb_pub;
 use crate::history::*;
 use crate::movegen::{
-    ExtMove, MAX_MOVES, MoveList, generate_captures, generate_evasions, generate_quiets,
+    ExtMove, MOVE_LIST_CAPACITY, MoveList, generate_captures_unchecked,
+    generate_evasions_unchecked, generate_quiets_unchecked,
 };
 use crate::position::Position;
 use crate::types::*;
@@ -179,7 +180,7 @@ pub struct MovePicker<'a> {
 
     // Move buffers and pointers
     // PERF: Using MaybeUninit avoids 2KB zero-init per node (matches C++ behavior)
-    moves: [core::mem::MaybeUninit<ExtMove>; MAX_MOVES],
+    moves: [core::mem::MaybeUninit<ExtMove>; MOVE_LIST_CAPACITY],
     // Each generate_and_score_* call generates into a stack-local MoveList (as in C++).
     cur: usize,     // Current position in moves array
     end_cur: usize, // End of current stage moves
@@ -357,11 +358,11 @@ impl<'a> MovePicker<'a> {
     ///
     /// # Safety
     ///
-    /// `idx < MAX_MOVES`.
+    /// `idx < MOVE_LIST_CAPACITY`.
     #[inline(always)]
     unsafe fn set_move(&mut self, idx: usize, em: ExtMove) {
-        debug_assert!(idx < MAX_MOVES);
-        // SAFETY: `idx < MAX_MOVES` by the caller's contract
+        debug_assert!(idx < MOVE_LIST_CAPACITY);
+        // SAFETY: `idx < MOVE_LIST_CAPACITY` by the caller's contract
         unsafe { self.moves.get_unchecked_mut(idx).write(em) };
     }
 
@@ -369,8 +370,8 @@ impl<'a> MovePicker<'a> {
     /// SAFETY: Caller must ensure idx has been previously written to
     #[inline(always)]
     unsafe fn get_move(&self, idx: usize) -> ExtMove {
-        debug_assert!(idx < MAX_MOVES);
-        // SAFETY: idx is bounded by MAX_MOVES in all callers
+        debug_assert!(idx < MOVE_LIST_CAPACITY);
+        // SAFETY: idx is bounded by the move count, below MOVE_LIST_CAPACITY, in all callers
         unsafe { self.moves.get_unchecked(idx).assume_init() }
     }
 
@@ -378,8 +379,8 @@ impl<'a> MovePicker<'a> {
     /// SAFETY: Caller must ensure idx has been previously written to
     #[inline(always)]
     unsafe fn get_value(&self, idx: usize) -> i32 {
-        debug_assert!(idx < MAX_MOVES);
-        // SAFETY: idx is bounded by MAX_MOVES in all callers
+        debug_assert!(idx < MOVE_LIST_CAPACITY);
+        // SAFETY: idx is bounded by the move count, below MOVE_LIST_CAPACITY, in all callers
         unsafe { self.moves.get_unchecked(idx).assume_init_ref().value }
     }
 
@@ -396,7 +397,7 @@ impl<'a> MovePicker<'a> {
 
         // PERF: Create local MoveList (matches C++ pattern - goes out of scope after scoring)
         let mut ml = MoveList::new(); // move generation
-        generate_captures(pos, &mut ml);
+        generate_captures_unchecked(pos, &mut ml);
 
         // Debug validation: verify all generated moves are actually captures
         if cfg!(debug_assertions) {
@@ -454,7 +455,7 @@ impl<'a> MovePicker<'a> {
 
             // Per 8551f86e: removed check bonus for captures
 
-            // SAFETY: indices are bounded by the legal move count, which is <= MAX_MOVES
+            // SAFETY: indices are bounded by the legal move count, below MOVE_LIST_CAPACITY
             unsafe {
                 self.moves
                     .get_unchecked_mut(count)
@@ -463,7 +464,7 @@ impl<'a> MovePicker<'a> {
             count += 1;
         }
 
-        debug_assert!(count <= MAX_MOVES, "Generated too many moves");
+        debug_assert!(count <= MOVE_LIST_CAPACITY, "Generated too many moves");
         count
     }
 
@@ -475,7 +476,7 @@ impl<'a> MovePicker<'a> {
 
         // PERF: Create local MoveList (matches C++ pattern - goes out of scope after scoring)
         let mut ml = MoveList::new(); // move generation
-        generate_quiets(pos, &mut ml);
+        generate_quiets_unchecked(pos, &mut ml);
 
         let mut count = self.cur;
         let us = pos.side_to_move();
@@ -629,7 +630,7 @@ impl<'a> MovePicker<'a> {
                 value += 16384;
             }
 
-            // SAFETY: indices are bounded by the legal move count, which is <= MAX_MOVES
+            // SAFETY: indices are bounded by the legal move count, below MOVE_LIST_CAPACITY
             unsafe {
                 self.moves
                     .get_unchecked_mut(count)
@@ -638,7 +639,7 @@ impl<'a> MovePicker<'a> {
             count += 1;
         }
 
-        debug_assert!(count <= MAX_MOVES, "Generated too many moves");
+        debug_assert!(count <= MOVE_LIST_CAPACITY, "Generated too many moves");
         count
     }
 
@@ -650,7 +651,7 @@ impl<'a> MovePicker<'a> {
 
         // PERF: Create local MoveList (matches C++ pattern - goes out of scope after scoring)
         let mut ml = MoveList::new(); // move generation
-        generate_evasions(pos, &mut ml);
+        generate_evasions_unchecked(pos, &mut ml);
 
         let mut count = self.cur;
         let us = pos.side_to_move();
@@ -726,7 +727,7 @@ impl<'a> MovePicker<'a> {
                 }
             };
 
-            // SAFETY: indices are bounded by the legal move count, which is <= MAX_MOVES
+            // SAFETY: indices are bounded by the legal move count, below MOVE_LIST_CAPACITY
             unsafe {
                 self.moves
                     .get_unchecked_mut(count)
@@ -735,7 +736,7 @@ impl<'a> MovePicker<'a> {
             count += 1;
         }
 
-        debug_assert!(count <= MAX_MOVES, "Generated too many moves");
+        debug_assert!(count <= MOVE_LIST_CAPACITY, "Generated too many moves");
         count
     }
 
@@ -746,7 +747,7 @@ impl<'a> MovePicker<'a> {
     /// The order of moves smaller than the limit is left unspecified.
     fn partial_insertion_sort(&mut self, begin: usize, end: usize, limit: i32) {
         debug_assert!(begin <= end, "Invalid range for partial_insertion_sort");
-        debug_assert!(end <= MAX_MOVES, "End index out of bounds");
+        debug_assert!(end <= MOVE_LIST_CAPACITY, "End index out of bounds");
 
         if end - begin <= 1 {
             return;
@@ -765,7 +766,7 @@ impl<'a> MovePicker<'a> {
             let mut sorter = unsafe { avx512_move_sorter::MoveSorter::new(self.get_move(begin)) };
 
             while p < end {
-                // SAFETY: indices begin..end have been initialized by scoring functions and are below MAX_MOVES.
+                // SAFETY: indices begin..end have been initialized by scoring functions and are below MOVE_LIST_CAPACITY.
                 unsafe {
                     if self.get_value(p) >= limit {
                         if sorted_end - begin + 1 >= avx512_move_sorter::MoveSorter::MAX_ELEMENTS {
@@ -789,7 +790,7 @@ impl<'a> MovePicker<'a> {
         }
 
         while p < end {
-            // SAFETY: indices begin..end have been initialized by scoring functions and are below MAX_MOVES.
+            // SAFETY: indices begin..end have been initialized by scoring functions and are below MOVE_LIST_CAPACITY.
             unsafe {
                 if self.get_value(p) >= limit {
                     let tmp = self.get_move(p);
@@ -878,7 +879,7 @@ impl<'a> MovePicker<'a> {
                             true
                         } else {
                             // SAFETY: `end_bad_moves` trails the select cursor, so it is below the number of
-                            // generated moves, which is <= MAX_MOVES.
+                            // generated moves, which is below MOVE_LIST_CAPACITY.
                             unsafe { mp.set_move(mp.end_bad_moves, cur_move) };
                             mp.end_bad_moves += 1;
                             false
@@ -915,7 +916,7 @@ impl<'a> MovePicker<'a> {
                             true
                         } else {
                             // SAFETY: `end_bad_moves` trails the select cursor, so it is below the number of
-                            // generated moves, which is <= MAX_MOVES.
+                            // generated moves, which is below MOVE_LIST_CAPACITY.
                             unsafe { mp.set_move(mp.end_bad_moves, cur_move) };
                             mp.end_bad_moves += 1;
                             false

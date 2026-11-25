@@ -606,16 +606,12 @@ impl Worker {
         //   sharedHistory.correctionHistory.clear_range(-5,    numaThreadIdx, numaTotal);
         //   sharedHistory.pawnHistory.clear_range(-1338, numaThreadIdx, numaTotal);
         // No lock is taken here: ThreadPool::clear() already holds the pool lock.
-        // SAFETY: `clear` runs while no search is active, and each worker clears its own partition
-        // (`numa_thread_idx < numa_total`, the latter clamped to at least 1).
-        unsafe {
-            self.shared_state.shared_histories.clear_range(
-                -5,
-                -1338,
-                self.numa_thread_idx,
-                self.numa_total.max(1),
-            );
-        }
+        self.shared_state.shared_histories.clear_range(
+            -5,
+            -1338,
+            self.numa_thread_idx,
+            self.numa_total.max(1),
+        );
 
         // ttMoveHistory = 0
         self.tt_move_history.set(0);
@@ -635,12 +631,9 @@ impl Worker {
         // This constant-size history is shared by the workers in one NUMA
         // node, so only that node's worker 0 may initialize it.
         if self.numa_thread_idx == 0 {
-            // SAFETY: `clear` runs while no search is active, and only the worker with numa_thread_idx == 0 on this node writes this shared block (see above).
-            unsafe {
-                self.shared_state
-                    .shared_histories
-                    .fill_continuation_history(-586);
-            }
+            self.shared_state
+                .shared_histories
+                .fill_continuation_history(-586);
         }
 
         // lowPlyHistory.fill(102) - this is done in iterative_deepening

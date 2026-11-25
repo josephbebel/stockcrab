@@ -23,6 +23,7 @@ use crate::bitboard_fast as bitboard;
 use crate::movegen::{GenType, generate};
 use crate::syzygy::{self, ProbeState};
 use crate::types::*;
+use core::cell::Cell;
 use core::fmt;
 
 // ---------------------------------------------------------------------------
@@ -514,8 +515,8 @@ impl std::error::Error for PositionSetError {}
 
 /// StateInfo struct stores information needed to restore a Position object to
 /// its previous state when we retract a move. The states live in a ring buffer
-/// owned by the Position (`state_infos`); `do_move` advances into the next slot.
-#[derive(Clone, Copy, Debug)]
+/// owned by the Position (`ring`); `do_move` advances into the next slot.
+#[derive(Clone, Debug)]
 #[repr(C)] // Ensure predictable layout for partial copy optimization
 pub struct StateInfo {
     // Copied when making a move
@@ -535,7 +536,9 @@ pub struct StateInfo {
     pub blockers_for_king: [Bitboard; COLOR_NB],
     pub pinners: [Bitboard; COLOR_NB],
     pub check_squares: [Bitboard; PIECE_TYPE_NB],
-    pub threats: [Bitboard; PIECE_TYPE_NB],
+    /// Squares attacked by the side not to move, per piece type; filled lazily by
+    /// `Position::threats_by` through a shared reference, hence the `Cell`.
+    pub threats: Cell<[Bitboard; PIECE_TYPE_NB]>,
     pub captured_piece: Piece,
     pub repetition: i32,
     /// The board packed one nibble per square (see `pack_pieces`): with the key, it identifies
@@ -560,7 +563,7 @@ impl Default for StateInfo {
             blockers_for_king: [0; COLOR_NB],
             pinners: [0; COLOR_NB],
             check_squares: [0; PIECE_TYPE_NB],
-            threats: [0; PIECE_TYPE_NB],
+            threats: Cell::new([0; PIECE_TYPE_NB]),
             captured_piece: Piece::NoPiece,
             repetition: 0,
             piece_placement: [0; 32],
@@ -577,6 +580,13 @@ impl Default for StateInfo {
 /// information and repetition history of the current and previous plies. Set it up with
 /// [`Position::set_fen`]; make and unmake moves with [`Position::do_move`] /
 /// [`Position::undo_move`] (legality unchecked) or [`Position::do_move_owned`] (checked).
+///
+/// A `Position` is `Send` but not `Sync`: [`Position::threats_by`] fills a cache through `&self`.
+///
+/// ```compile_fail
+/// fn shared<T: Sync>() {}
+/// shared::<stockcrab::position::Position>();
+/// ```
 pub struct Position {
     // Board representation
     board: [Piece; SQUARE_NB],
@@ -597,26 +607,37 @@ pub struct Position {
     state_idx: u16,
     /// Current state: always `ring + state_idx`.
     st: *mut StateInfo,
-    /// Slot 0 of `state_infos`, with the provenance of the whole ring.
+    /// The ring buffer of states (C++ `StateInfo stateInfos[MAX_HIST]`): slot 0 of a heap array
+    /// of `MAX_HIST` states owned by this position (from `Box::into_raw`, freed in `Drop`). It is
+    /// held as a raw pointer rather than a `Box`, because moving a `Box` would assert unique
+    /// access and invalidate `st`; on the heap, `st` stays valid when the position is moved.
     ring: *mut StateInfo,
-    /// The ring buffer of states (C++ `StateInfo stateInfos[MAX_HIST]`). Boxed so a `Position`
-    /// stays cheap to move and `st` stays valid when it is moved.
-    state_infos: Box<[StateInfo; MAX_HIST]>,
 }
 
-// SAFETY: the raw pointers, `st` and `ring`, point into the position's own `state_infos` box,
-// which moves with it and is never shared; so a Position is as thread-safe as its plain-data
-// fields.
-unsafe impl Send for Position {}
-// SAFETY: `&Position` only reads through `st` (into owned storage, see above).
-unsafe impl Sync for Position {}
+impl Drop for Position {
+    fn drop(&mut self) {
+        // SAFETY: `ring` came from `Box::into_raw` of a `Box<[StateInfo; MAX_HIST]>` in
+        // `alloc_ring` and is freed only here.
+        drop(unsafe { Box::from_raw(self.ring.cast::<[StateInfo; MAX_HIST]>()) });
+    }
+}
 
-/// A zeroed state ring (C++ `set` memsets the whole Position, ring included).
-fn new_state_infos() -> Box<[StateInfo; MAX_HIST]> {
-    vec![StateInfo::default(); MAX_HIST]
+// SAFETY: the raw pointers, `st` and `ring`, point into the position's own heap ring, which
+// moves with it and is never shared, so sending a Position sends everything it points to.
+// It is not `Sync`: `threats_by` fills a `Cell` cache through `&self`.
+unsafe impl Send for Position {}
+// A panic cannot leave the threat cache half-written: it is replaced by one `Cell::set` of a
+// fully computed array.
+impl core::panic::RefUnwindSafe for Position {}
+
+/// A new state ring holding `states` (C++ `set` memsets the whole Position, ring included), as
+/// the raw slot-0 pointer that `Position::ring` owns.
+fn alloc_ring(states: Vec<StateInfo>) -> *mut StateInfo {
+    let ring: Box<[StateInfo; MAX_HIST]> = states
         .into_boxed_slice()
         .try_into()
-        .unwrap_or_else(|_| unreachable!("the Vec has MAX_HIST elements"))
+        .unwrap_or_else(|_| unreachable!("a state ring has MAX_HIST elements"));
+    Box::into_raw(ring).cast::<StateInfo>()
 }
 
 #[inline(always)]
@@ -673,8 +694,9 @@ impl Clone for Position {
     /// Deep copy, history ring included (C++ `set` + `copy_state_infos`), so the clone keeps
     /// the same repetition history and is independent of the original.
     fn clone(&self) -> Self {
-        let mut state_infos = self.state_infos.clone();
-        let ring = state_infos.as_mut_ptr();
+        // SAFETY: `ring` points to the `MAX_HIST` initialised states of this position's ring.
+        let states = unsafe { core::slice::from_raw_parts(self.ring, MAX_HIST) };
+        let ring = alloc_ring(states.to_vec());
         // SAFETY: `state_idx < MAX_HIST`; the pointer has the provenance of the whole ring.
         let st = unsafe { ring.add(usize::from(self.state_idx)) };
         Position {
@@ -692,7 +714,6 @@ impl Clone for Position {
             state_idx: self.state_idx,
             st,
             ring,
-            state_infos,
         }
     }
 }
@@ -712,9 +733,8 @@ impl Default for Position {
 impl Position {
     // Private builder: never published by a safe constructor before FEN validation finishes.
     fn empty_builder() -> Self {
-        let mut state_infos = new_state_infos();
         // The pointer has the provenance of the whole ring.
-        let ring = state_infos.as_mut_ptr();
+        let ring = alloc_ring(vec![StateInfo::default(); MAX_HIST]);
         Position {
             board: [Piece::NoPiece; SQUARE_NB],
             by_type_bb: [0; PIECE_TYPE_NB],
@@ -730,15 +750,14 @@ impl Position {
             state_idx: 0,
             st: ring,
             ring,
-            state_infos,
         }
     }
 
     /// The current [`StateInfo`].
     ///
     /// Every method of `Position` reads the current state through this accessor, so the
-    /// raw-pointer invariant is stated once: `self.ring` is `state_infos.as_mut_ptr()` (a pointer
-    /// to the whole boxed ring, which never moves) and `self.st` is always
+    /// raw-pointer invariant is stated once: `self.ring` points to slot 0 of the position's own
+    /// heap ring (with the provenance of all of it; it never moves) and `self.st` is always
     /// `ring + state_idx`. No reference to the whole ring is created while a state is borrowed
     /// mutably: every slot is reached through `ring`.
     #[inline(always)]
@@ -1746,10 +1765,10 @@ impl Position {
     /// (`ALL_PIECES`: with any piece); computed on first use for each state and cached.
     #[inline(always)]
     pub fn threats_by(&self, pt: PieceType) -> Bitboard {
-        if self.st().threats[ALL_PIECES as usize] == 0 {
+        if self.st().threats.get()[ALL_PIECES as usize] == 0 {
             self.compute_threats();
         }
-        self.st().threats[pt as usize]
+        self.st().threats.get()[pt as usize]
     }
 
     // -------------------------------------------------------------------
@@ -2395,7 +2414,8 @@ impl Position {
     ///
     /// # Safety
     /// `m` must be the most recent move made on this position, with no intervening
-    /// unmatched move or null move.
+    /// unmatched move or null move, and fewer than `MAX_HIST` moves and null moves may have been
+    /// made since: deeper lines overwrite the ring slot that holds the state to restore.
     // NOT inlined to match C++ (undo_move is a separate function call in C++)
     #[inline(never)]
     pub unsafe fn undo_move(&mut self, m: Move) {
@@ -2509,7 +2529,8 @@ impl Position {
     /// Must be used to undo a "null move"
     ///
     /// # Safety
-    /// The most recent unmatched operation must be `do_null_move`.
+    /// The most recent unmatched operation must be `do_null_move`, with fewer than `MAX_HIST` moves
+    /// and null moves made since (see [`Position::undo_move`]).
     pub unsafe fn undo_null_move(&mut self) {
         debug_assert!(self.checkers() == 0, "undo_null_move called when in check");
 
@@ -3708,7 +3729,7 @@ impl Position {
         st.check_squares[PieceType::Queen as usize] = b_attacks | r_attacks;
         st.check_squares[PieceType::King as usize] = 0;
 
-        st.threats[ALL_PIECES as usize] = 0;
+        st.threats.set([0; PIECE_TYPE_NB]);
     }
 
     /// Squares threatened by the side not to move, computed lazily on the first
@@ -3731,13 +3752,8 @@ impl Position {
             threats[pt as usize] = self.xattacks_by(pt, them, occupied);
             threats[ALL_PIECES as usize] |= threats[pt as usize];
         }
-        // SAFETY: `self.st` points at the current slot of the position's own ring (see `st()`),
-        // derived from the ring's `&mut` through `ring`, so it carries write permission. Like the C++ `const`
-        // method, this only caches data derived from the position; no reference into the state
-        // is held across `threats_by`, and a position shared between threads (the root
-        // snapshot in `start_thinking`) is only ever cloned, never queried, so the write cannot
-        // race.
-        unsafe { (*self.st).threats = threats };
+        // Like the C++ `const` method, this only caches data derived from the position.
+        self.st().threats.set(threats);
     }
 
     /// Initialize all StateInfo fields from the current position.

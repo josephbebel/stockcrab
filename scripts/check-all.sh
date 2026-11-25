@@ -1,14 +1,13 @@
 #!/bin/bash
 # Type-check every target configuration this crate supports. SIMD paths are
 # selected at compile time, so a change that builds on one configuration can
-# break another (this has happened: an import used only by the aarch64 NEON
-# module). Host-aware: on an x86-64 host the x86 rows use the host target; on any other
-# host (e.g. Apple Silicon) they are replaced by host rows plus cross-checked x86-64 SIMD
-# rows (baseline, v2, v3, AVX-512 with VNNI, Ice Lake, AVX-512F without BW) for
-# x86_64-unknown-linux-gnu and/or x86_64-apple-darwin. Those cross rows need the target to be
-# installed; a missing one prints `skipped` and does not fail the script, so read the output:
-# a run without them does NOT cover the x86 SIMD paths. A row is `ok` only when it compiles
-# without warnings (`WARNINGS` and `FAILED` both make the script exit 1).
+# break another. The x86-64 SIMD rows (baseline, v2, v3, AVX-512 with VNNI, Ice Lake,
+# AVX-512F without BW) are checked with an explicit --target, so RUSTFLAGS reach the
+# crate only and build scripts and proc-macros run on any host CPU. On an x86-64 host
+# they use the host target; elsewhere they need x86_64-unknown-linux-gnu or
+# x86_64-apple-darwin installed, and a missing one prints `skipped` (the x86 SIMD paths
+# are then NOT covered). A row is `ok` only when it compiles without warnings
+# (`WARNINGS` and `FAILED` both make the script exit 1).
 # Needs: rustup target add aarch64-unknown-linux-gnu aarch64-apple-darwin \
 #   x86_64-pc-windows-gnu, and on a non-x86 host also x86_64-unknown-linux-gnu (or
 #   x86_64-apple-darwin).
@@ -40,39 +39,34 @@ case "$host_arch" in
   x86_64|amd64) x86_host=1 ;;
   *)            x86_host=0 ;;
 esac
-# Rows that need an x86-64 host (host-target builds with x86 target-cpu flags).
+x86_matrix() { # target: the full x86-64 SIMD matrix, cross-checked
+  local t=$1 sfx=$2
+  run "x86-64 baseline$sfx"   xbase   ""                          --target "$t"
+  EXTRA="--release $EXTRA" run "x86-64 release$sfx" xrel "" --target "$t"
+  run "x86-64-v2$sfx"         xv2     "-C target-cpu=x86-64-v2"   --target "$t"
+  run "x86-64-v3$sfx"         xv3     "-C target-cpu=x86-64-v3"   --target "$t"
+  run "AVX-512 VNNI$sfx"      xv4vnni "-C target-cpu=x86-64-v4 -C target-feature=+avx512vnni" --target "$t"
+  run "AVX-512 ICL$sfx"       xicl    "-C target-cpu=icelake-server" --target "$t"
+  run "AVX-512F no BW$sfx"    xfnobw  "-C target-feature=+avx512f,-avx512bw" --target "$t"
+}
 if [ "$x86_host" = 1 ]; then
-  run "x86-64 baseline"  base   ""
-  EXTRA="--release $*" run "x86-64 release"   rel    ""
-  EXTRA="--release $*" run "x86-64 native rel." relnat "-C target-cpu=native"
-  run "x86-64-v2"        v2     "-C target-cpu=x86-64-v2"
-  run "x86-64-v3"        v3     "-C target-cpu=x86-64-v3"
-  run "AVX-512F without BW" f-no-bw "-C target-feature=+avx512f,-avx512bw"
-  run "x86-64 native"    native "-C target-cpu=native"
+  host_triple=$(rustc -vV | sed -n 's/^host: //p')
+  x86_matrix "$host_triple" ""
+  # This CPU's own feature set (whatever the runner has).
+  run "x86-64 native"         xnative "-C target-cpu=native"      --target "$host_triple"
 else
-  # Non-x86 host (e.g. aarch64): the host-target rows are the native ones, and
-  # x86-only -C target-cpu values do not exist.
+  # Non-x86 host (e.g. aarch64): the host-target rows are the native ones.
   run "host ($host_arch)"         host    ""
   EXTRA="--release $*" run "host ($host_arch) rel."  hostrel ""
   run "host native"      hostnat "-C target-cpu=native"
-  # x86-64 SIMD paths, cross-checked (`cargo check` needs no linker). With --target, RUSTFLAGS
-  # reach the target crates only, so build scripts still run with host code.
   installed=$(rustup target list --installed 2>/dev/null || true)
   has_target() { printf '%s\n' "$installed" | grep -qx "$1"; }
   x86_cross=""
   for t in x86_64-unknown-linux-gnu x86_64-apple-darwin; do
     if has_target "$t"; then
       if [ -z "$x86_cross" ]; then
-        # Full SIMD matrix on the first installed target.
         x86_cross=$t
-        run "x86-64 baseline (cross)" xbase "" --target "$t"
-        run "x86-64-v2 (cross)"   xv2   "-C target-cpu=x86-64-v2" --target "$t"
-        run "x86-64-v3 (cross)"   xv3   "-C target-cpu=x86-64-v3" --target "$t"
-        run "AVX-512 VNNI (cross)" xv4vnni \
-          "-C target-cpu=x86-64-v4 -C target-feature=+avx512vnni" --target "$t"
-        run "AVX-512 ICL (cross)" xicl  "-C target-cpu=icelake-server" --target "$t"
-        run "AVX-512F no BW (cross)" xfnobw \
-          "-C target-feature=+avx512f,-avx512bw" --target "$t"
+        x86_matrix "$t" " (cross)"
       else
         # The other OS: one AVX2 row for its cfg(target_os) paths.
         run "x86-64-v3 macOS (cross)" xv3mac "-C target-cpu=x86-64-v3" --target "$t"

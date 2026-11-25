@@ -1160,8 +1160,8 @@ fn worker_clear_uses_cpp_history_init_values() {
     // fails if `clear()` skips a table.
     worker.main_history[0][0].set(1234);
     worker.capture_history[1][2][3].set(1234);
-    shared.pawn_history[0][1][2].set(1234);
-    shared.correction_history[0].pawn.set(1000);
+    shared.pawn_history()[0][1][2].set(1234);
+    shared.correction_history()[0].pawn.set(1000);
     for (p1, s1, p2, s2) in [(0usize, 0usize, 0usize, 0usize), (5, 17, 9, 42)] {
         // Within the correction-history limit (1024), which `set` asserts in debug.
         worker.continuation_correction_history[p1][s1][p2][s2].set(1000);
@@ -1224,9 +1224,9 @@ fn worker_clear_uses_cpp_history_init_values() {
     }
 
     // sharedHistory.correctionHistory.clear_range(-5, ...)
-    let corr_size = shared.correction_history.get_size();
+    let corr_size = shared.correction_history().get_size();
     for i in [0usize, 1, corr_size / 2, corr_size - 1] {
-        let bundle = &shared.correction_history[i];
+        let bundle = &shared.correction_history()[i];
         assert_eq!(bundle.pawn.get(), -5, "correctionHistory[{i}].pawn");
         assert_eq!(bundle.minor.get(), -5, "correctionHistory[{i}].minor");
         assert_eq!(
@@ -1242,11 +1242,11 @@ fn worker_clear_uses_cpp_history_init_values() {
     }
 
     // sharedHistory.pawnHistory.clear_range(-1338, ...)
-    let pawn_size = shared.pawn_history.get_size();
+    let pawn_size = shared.pawn_history().get_size();
     for i in [0usize, 1, pawn_size / 2, pawn_size - 1] {
         for (pc, sq) in [(0usize, 0usize), (6, 31), (15, 63)] {
             assert_eq!(
-                shared.pawn_history[i][pc][sq].get(),
+                shared.pawn_history()[i][pc][sq].get(),
                 -1338,
                 "pawnHistory[{i}][{pc}][{sq}] should be filled with -1338 (was -1238)"
             );

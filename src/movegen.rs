@@ -35,6 +35,16 @@ use core::mem::MaybeUninit;
 
 pub const MAX_MOVES: usize = 256;
 
+/// Capacity of a [`MoveList`] and of the move picker's move array. Upstream sizes both with
+/// `MAX_MOVES`, relying on the 218 legal moves of the richest reachable position, but `set_fen`
+/// also accepts unreachable positions. Any position it accepts (at most 16 pieces a side, and no
+/// more promoted pieces than missing pawns), and any position reached from one, has at most 323
+/// legal moves: nine queens with 27 moves each, two rooks with 14, two bishops with 13, two
+/// knights with 8, and the king with 8 plus two castlings. The AVX-512 generator stores a full
+/// vector of up to 32 moves past the current count, hence 323 + 32 rounded up.
+pub const MOVE_LIST_CAPACITY: usize = 384;
+const _: () = assert!(9 * 27 + 2 * 14 + 2 * 13 + 2 * 8 + 8 + 2 + 32 <= MOVE_LIST_CAPACITY);
+
 // ---------------------------------------------------------------------------
 // Core Types
 // ---------------------------------------------------------------------------
@@ -109,7 +119,7 @@ impl Eq for ExtMove {}
 pub struct MoveList {
     // Matches C++ MoveList storage: a plain `Move` buffer (no `value` field).
     // Move ordering/scoring lives in MovePicker's separate `ExtMove` arrays.
-    moves: [MaybeUninit<Move>; MAX_MOVES],
+    moves: [MaybeUninit<Move>; MOVE_LIST_CAPACITY],
     count: usize,
 }
 
@@ -118,7 +128,9 @@ impl MoveList {
     pub fn new() -> Self {
         MoveList {
             // SAFETY: MaybeUninit doesn't require initialization - this is a no-op
-            moves: unsafe { MaybeUninit::<[MaybeUninit<Move>; MAX_MOVES]>::uninit().assume_init() },
+            moves: unsafe {
+                MaybeUninit::<[MaybeUninit<Move>; MOVE_LIST_CAPACITY]>::uninit().assume_init()
+            },
             count: 0,
         }
     }
@@ -157,9 +169,8 @@ impl MoveList {
 
     #[inline(always)]
     pub fn end(&self) -> *const Move {
-        // SAFETY: count <= MAX_MOVES (push debug-asserts count < MAX_MOVES before incrementing;
-        // in release this relies on MAX_MOVES exceeding the maximum legal move count of
-        // any position), so `add(count)` stays within or one past the end of the `moves` array.
+        // SAFETY: count <= MOVE_LIST_CAPACITY (see its bound), so `add(count)` stays within or one
+        // past the end of the `moves` array.
         unsafe { (self.moves.as_ptr() as *const Move).add(self.count) }
     }
 
@@ -170,8 +181,9 @@ impl MoveList {
 
     #[inline(always)]
     fn push(&mut self, mv: Move) {
-        debug_assert!(self.count < MAX_MOVES);
-        // SAFETY: count is always < MAX_MOVES.
+        debug_assert!(self.count < MOVE_LIST_CAPACITY);
+        // SAFETY: a list only ever holds one position's legal moves, fewer than
+        // MOVE_LIST_CAPACITY (see its bound).
         unsafe {
             (self.moves.as_mut_ptr().add(self.count) as *mut Move).write(mv);
         }
@@ -189,8 +201,8 @@ impl MoveList {
     ))]
     #[inline(always)]
     fn next_slot_ptr(&mut self) -> *mut Move {
-        debug_assert!(self.count < MAX_MOVES);
-        // SAFETY: count is always < MAX_MOVES and the slot is within the array.
+        debug_assert!(self.count < MOVE_LIST_CAPACITY);
+        // SAFETY: count < MOVE_LIST_CAPACITY (see its bound), so the slot is within the array.
         unsafe { self.moves.as_mut_ptr().add(self.count) as *mut Move }
     }
 
@@ -202,7 +214,7 @@ impl MoveList {
     ))]
     #[inline(always)]
     fn advance_by(&mut self, n: usize) {
-        debug_assert!(self.count + n <= MAX_MOVES);
+        debug_assert!(self.count + n <= MOVE_LIST_CAPACITY);
         self.count += n;
     }
 }
@@ -305,10 +317,10 @@ mod simd {
     pub fn splat_pawn_moves<const OFFSET: i8>(list: &mut MoveList, to_bb: Bitboard) {
         debug_assert!(to_bb.count_ones() <= 8); // <= 8 pawns per side
         let count = to_bb.count_ones() as usize;
-        debug_assert!(list.count + 8 <= MAX_MOVES);
+        debug_assert!(list.count + 8 <= MOVE_LIST_CAPACITY);
         // SAFETY: the full-width store writes 8 Move (u16) slots (16 bytes) starting at
-        // `list.count`; this is in bounds because count + 8 <= MAX_MOVES holds for any
-        // position (at most ~218 moves), as in upstream.
+        // `list.count`; this is in bounds because the list holds fewer than 323 moves before the
+        // store, so count + 8 <= MOVE_LIST_CAPACITY (see its bound).
         unsafe {
             // Compress the low 8 bytes (up to 8 squares) into a __m128i, widen to i16.
             let to_squares = _mm_cvtepi8_epi16(_mm512_castsi512_si128(_mm512_maskz_compress_epi8(
@@ -329,10 +341,10 @@ mod simd {
     pub fn splat_moves(list: &mut MoveList, from: Square, to_bb: Bitboard) {
         debug_assert!(to_bb.count_ones() <= 32); // Q can attack up to 27 squares
         let count = to_bb.count_ones() as usize;
-        debug_assert!(list.count + 32 <= MAX_MOVES);
+        debug_assert!(list.count + 32 <= MOVE_LIST_CAPACITY);
         // SAFETY: the full-width store writes 32 Move (u16) slots (64 bytes) starting at
-        // `list.count`; this is in bounds because count + 32 <= MAX_MOVES holds for any
-        // position (at most ~218 moves), as in upstream.
+        // `list.count`; this is in bounds because the list holds fewer than 323 moves before the
+        // store, so count + 32 <= MOVE_LIST_CAPACITY (see its bound).
         unsafe {
             let from_vec = _mm512_set1_epi16(Move::from_to(from, Square::SQ_A1).raw() as i16);
             // Compress the low 32 bytes (up to 32 squares) into a __m256i, widen to i16.
@@ -745,23 +757,56 @@ pub fn init() {
 // Public API - matches C++ template<GenType> generate() pattern
 // =============================================================================
 
-/// Generate legal captures and queen promotions.
-#[inline(never)]
+/// Generate legal captures and queen promotions. Panics if the side to move is in check.
+#[inline]
 pub fn generate_captures(pos: &Position, list: &mut MoveList) {
+    assert!(
+        pos.checkers() == 0,
+        "generate_captures: the side to move is in check"
+    );
+    generate_captures_unchecked(pos, list);
+}
+
+/// Generate legal quiet moves and underpromotions. Panics if the side to move is in check.
+#[inline]
+pub fn generate_quiets(pos: &Position, list: &mut MoveList) {
+    assert!(
+        pos.checkers() == 0,
+        "generate_quiets: the side to move is in check"
+    );
+    generate_quiets_unchecked(pos, list);
+}
+
+/// Generate legal check evasions. Panics unless the side to move is in check.
+#[inline]
+pub fn generate_evasions(pos: &Position, list: &mut MoveList) {
+    assert!(
+        pos.checkers() != 0,
+        "generate_evasions: the side to move is not in check"
+    );
+    generate_evasions_unchecked(pos, list);
+}
+
+// The engine's own entry points (MovePicker), which establish the check state themselves; the
+// precondition is only debug-checked, as in C++.
+
+#[inline(never)]
+pub(crate) fn generate_captures_unchecked(pos: &Position, list: &mut MoveList) {
+    debug_assert!(pos.checkers() == 0);
     list.clear();
     generate_typed::<{ GenType::Captures as u8 }>(pos, list);
 }
 
-/// Generate legal quiet moves and underpromotions.
 #[inline(never)]
-pub fn generate_quiets(pos: &Position, list: &mut MoveList) {
+pub(crate) fn generate_quiets_unchecked(pos: &Position, list: &mut MoveList) {
+    debug_assert!(pos.checkers() == 0);
     list.clear();
     generate_typed::<{ GenType::Quiets as u8 }>(pos, list);
 }
 
-/// Generate legal check evasions.
 #[inline(never)]
-pub fn generate_evasions(pos: &Position, list: &mut MoveList) {
+pub(crate) fn generate_evasions_unchecked(pos: &Position, list: &mut MoveList) {
+    debug_assert!(pos.checkers() != 0);
     list.clear();
     generate_typed::<{ GenType::Evasions as u8 }>(pos, list);
 }
