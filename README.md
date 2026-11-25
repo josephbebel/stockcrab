@@ -55,6 +55,20 @@ commands from a terminal, including `bench`, `speedtest`, `eval`, `d`, `go perft
 The UCI options are those of Stockfish, including `Threads`, `Hash`, `MultiPV`, `Skill Level`,
 `UCI_LimitStrength`, `UCI_Elo`, `SyzygyPath` and `NumaPolicy`.
 
+## Strength and speed
+
+Stockcrab (`make build-native`) against C++ Stockfish at the same commit built with
+`make profile-build ARCH=x86-64-avx512icl` (GCC, PGO), on an AMD Ryzen 9 9950X3D. Games use the
+UHO_Lichess_4852_v1 openings, each played with both colours, and fishtest's adjudication rules;
+error bars are 95% intervals.
+
+| | Result |
+|---|---|
+| 1 thread, 10+0.1, 16 MB hash, 878 games | +1.2 ± 10.4 Elo |
+| 4 threads, 5+0.05, 64 MB hash, 480 games | +1.5 ± 14.5 Elo |
+| Speed, 1 thread (`bench 16 1 18`) | 98.5% of the PGO build's nodes per second, 103.6% of a non-PGO build's |
+| Speed, 16 threads (`bench 256 16 20`) | about 98% and 101%, within the run-to-run spread |
+
 ## Testing
 
 ```bash
@@ -75,7 +89,7 @@ comparison to random positions and tablebase probing. See [CONTRIBUTING.md](CONT
 
 * Linux x86-64: fully tested, including the parity checks against C++.
 * AArch64: tested on Apple Silicon (macOS) and Linux, with and without the dot-product kernels.
-* Windows x86-64: compiles; NUMA binding, large pages and the shared network memory are not
+* Windows x86-64: tested in CI; NUMA binding, large pages and the shared network memory are not
   implemented there.
 * Not ported: the RISC-V vector, LoongArch and PowerPC kernels. Other targets use the scalar code.
 
