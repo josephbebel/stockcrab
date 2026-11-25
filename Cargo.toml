@@ -1,0 +1,75 @@
+[package]
+name = "stockcrab"
+version = "0.1.0"
+edition = "2024"
+# 1.89 stabilised the AVX-512 intrinsics that the x86-64 NNUE kernels use; 1.98
+# stabilised the AArch64 `neon-dotprod` intrinsics (`vdotq_s32`), so one MSRV
+# covers every feature combination.
+rust-version = "1.98"
+description = "A Rust port of the Stockfish UCI chess engine"
+readme = "README.md"
+license = "GPL-3.0-or-later"
+authors = ["Joseph Bebel", "The Stockfish developers (see AUTHORS file)"]
+repository = "https://github.com/josephbebel/stockcrab"
+homepage = "https://github.com/josephbebel/stockcrab"
+keywords = ["chess", "uci", "stockfish", "nnue", "engine"]
+categories = ["games"]
+exclude = ["/target", "*.nnue", "/.github"]
+
+[[bin]]
+name = "stockcrab"
+path = "src/main.rs"
+
+[dependencies]
+aligned = "0.4.3"
+bitflags = "2.9.3"
+# Byte views of the NNUE weight arrays and zeroed history tables, without `unsafe`.
+bytemuck = { version = "1.25", features = ["derive", "extern_crate_alloc", "min_const_generics", "zeroable_atomics"] }
+libc = "0.2.175"
+memmap2 = "0.9"
+
+[features]
+default = []
+# Enables the AArch64 dot-product (SDOT) NNUE kernels on targets whose baseline lacks
+# `dotprod` (e.g. aarch64 Linux on ARMv8.2+ CPUs). Apple Silicon targets have it already,
+# and the feature has no effect on other architectures.
+neon-dotprod = []
+
+[target.'cfg(unix)'.dependencies]
+nix = { version = "0.31", features = ["fs", "poll", "sched", "socket", "uio", "user"] }
+
+[target.'cfg(windows)'.dependencies]
+windows-sys = { version = "0.59", features = ["Win32_Globalization"] }
+
+[dev-dependencies]
+proptest = "1.4.0"
+tempfile = "3.27"
+
+[profile.release]
+lto = "fat"           # Full LTO for maximum optimization
+codegen-units = 1     # Single codegen unit for better optimization
+panic = "abort"       # Smaller binary, no unwinding overhead
+opt-level = 3         # Maximum optimization
+
+# Lints that are deliberately relaxed because this crate mirrors the C++ sources
+# line for line (so upstream commits stay easy to port) and its kernels are
+# hand-tuned. Everything else in clippy's default set is enforced.
+[lints.clippy]
+undocumented_unsafe_blocks = "warn"  # every unsafe block carries a SAFETY comment
+needless_range_loop = "allow"   # indexed loops mirror the C++ and keep codegen predictable
+too_many_arguments = "allow"    # search/NNUE kernels keep the C++ signatures
+type_complexity = "allow"
+new_without_default = "allow"   # constructors mirror C++ ctors; Default adds nothing
+erasing_op = "allow"            # `0 * PS_NB` entries keep the feature tables regular
+identity_op = "allow"
+collapsible_if = "allow"        # nested ifs mirror the C++ structure
+blocks_in_conditions = "allow"
+upper_case_acronyms = "allow"   # Syzygy's WDL/DTZ/STM keep the upstream names
+field_reassign_with_default = "allow"
+useless_vec = "allow"
+items_after_test_module = "allow"
+len_without_is_empty = "allow"
+assertions_on_constants = "allow"
+vec_box = "allow"               # pawn-history entries are large; boxing keeps the Vec cheap to grow
+explicit_counter_loop = "allow"
+needless_return = "allow"       # early `return` in one cfg block is needed when another cfg is compiled

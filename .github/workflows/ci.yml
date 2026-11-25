@@ -1,0 +1,176 @@
+name: CI
+
+on:
+  push:
+  pull_request:
+  workflow_dispatch:        # run the whole matrix by hand
+  schedule:
+    - cron: "17 4 * * 1"    # weekly: catches breakage from a new stable toolchain or dependency
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  CARGO_TERM_COLOR: always
+  STOCKCRAB_REQUIRE_NET: "1"
+
+jobs:
+  test:
+    name: test (${{ matrix.name }})
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - name: linux x86-64-v3
+            os: ubuntu-latest
+            rustflags: "-C target-cpu=x86-64-v3"
+            features: ""
+          - name: linux x86-64 baseline
+            os: ubuntu-latest
+            rustflags: ""
+            features: ""
+          - name: windows x86-64-v3
+            os: windows-latest
+            rustflags: "-C target-cpu=x86-64-v3"
+            features: ""
+          # The Apple target enables dotprod (SDOT kernels) by default; this row
+          # keeps the plain NEON kernels built and tested.
+          - name: macOS arm64 plain NEON
+            os: macos-latest
+            rustflags: "-C target-feature=-dotprod"
+            features: ""
+          # Default Apple Silicon build: dotprod is a target feature there, so
+          # no Cargo feature is needed (the aarch64 Linux jobs cover the feature).
+          - name: macOS arm64 dotprod
+            os: macos-latest
+            rustflags: ""
+            features: ""
+    runs-on: ${{ matrix.os }}
+    env:
+      RUSTFLAGS: ${{ matrix.rustflags }}
+    steps:
+      - uses: actions/checkout@v4
+      - name: Read pinned upstream configuration
+        shell: bash
+        run: |
+          source config/upstream.env
+          printf '%s\n' "STOCKFISH_REVISION=$STOCKFISH_REVISION" "STOCKCRAB_NETWORK=$STOCKCRAB_NETWORK" "BENCH_NODES=$BENCH_NODES" >> "$GITHUB_ENV"
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - name: Cache NNUE network
+        uses: actions/cache@v4
+        with:
+          path: nn-*.nnue
+          key: nnue-${{ hashFiles('config/upstream.env') }}
+      - name: Fetch network
+        shell: bash
+        run: scripts/fetch-net.sh
+      - name: Verify required tablebase fixtures
+        if: runner.os == 'Linux'
+        run: cd tests/fixtures/syzygy && sha256sum -c SHA256SUMS
+      - name: Build
+        run: cargo build --release ${{ matrix.features }}
+      - name: Bench smoke test
+        shell: bash
+        run: |
+          set -euo pipefail
+          ./target/release/stockcrab bench 2>&1 | tee bench.log
+          n=$(awk '/Nodes searched/{print $NF}' bench.log)
+          [ "$n" = "$BENCH_NODES" ] || { echo "bench nodes $n != $BENCH_NODES"; exit 1; }
+      - name: Test
+        run: cargo test --release ${{ matrix.features }}
+      # std aborts on a double-closed or foreign file descriptor only with debug assertions,
+      # which is what makes descriptor-ownership bugs in the macOS fd-passing path deterministic.
+      - name: Library tests (debug profile)
+        if: runner.os == 'macOS'
+        run: RUST_MIN_STACK=50000000 cargo test --lib ${{ matrix.features }}
+      - name: AVX-512F without BW runtime regressions when the CPU supports F
+        if: runner.os == 'Linux'
+        run: |
+          if grep -qw avx512f /proc/cpuinfo; then
+            RUSTFLAGS='-C target-feature=+avx512f,-avx512bw' cargo test --release --target-dir /tmp/stockcrab-avx512f --lib --test regression_parity --test nnue_api_boundaries
+          else
+            echo 'No AVX-512F hardware: runtime row not executed (compile row remains required).'
+          fi
+      - name: Check out the pinned C++ reference
+        if: runner.os == 'Linux'
+        uses: actions/checkout@v4
+        with:
+          repository: official-stockfish/Stockfish
+          ref: ${{ env.STOCKFISH_REVISION }}
+          path: stockfish-reference
+      # bench_defaults_match_cpp_benchmark_cpp reads the reference's src/benchmark.cpp; in the
+      # Test step above the checkout does not exist yet, so the test runs here with the source
+      # required (only this Linux-only step has the checkout, hence the variable is set here).
+      - name: Bench defaults vs the pinned benchmark.cpp
+        if: runner.os == 'Linux'
+        run: |
+          STOCKFISH_DIR="$PWD/stockfish-reference" STOCKCRAB_REQUIRE_CPP_SRC=1 \
+            cargo test --release --test regression_parity bench_defaults
+      - name: Build the pinned C++ reference with the same network
+        if: runner.os == 'Linux'
+        run: |
+          ln -s "$PWD/$STOCKCRAB_NETWORK" "stockfish-reference/src/$STOCKCRAB_NETWORK"
+          make -C stockfish-reference/src -j2 build ARCH=x86-64-avx2
+      - name: Required differential parity vs C++
+        if: runner.os == 'Linux'
+        run: |
+          export STOCKFISH_DIR="$PWD/stockfish-reference"
+          export CPP_ENGINE="$STOCKFISH_DIR/src/stockfish" RUST_ENGINE="$PWD/target/release/stockcrab"
+          scripts/parity.sh
+          (cd "$STOCKFISH_DIR/src" && python3 "$OLDPWD/scripts/fuzz_diff.py" --positions 30 --depth 8)
+          (cd "$STOCKFISH_DIR/src" && python3 "$OLDPWD/scripts/fuzz_diff.py" --positions 30 --depth 8 --chess960)
+
+  lint:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy, rustfmt
+          targets: aarch64-unknown-linux-gnu, aarch64-apple-darwin, x86_64-pc-windows-gnu
+      - uses: Swatinem/rust-cache@v2
+      - run: cargo fmt --check
+      - run: cargo clippy --all-targets -- -D warnings
+      - name: Clippy aarch64 (NEON dot-product path)
+        run: cargo clippy --lib --bins --features neon-dotprod --target aarch64-unknown-linux-gnu -- -D warnings
+      - name: Type-check every supported target
+        run: scripts/check-all.sh
+
+  docs:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - name: Rustdoc without warnings
+        env:
+          RUSTDOCFLAGS: -D warnings
+        run: cargo doc --no-deps --lib
+      # Private items carry the port's most detailed comments; their intra-doc links and
+      # bare URLs are checked too.
+      - name: Rustdoc of private items without warnings
+        env:
+          RUSTDOCFLAGS: -D warnings
+        run: cargo doc --no-deps --lib --document-private-items
+      # Builds the packaged crate from the .crate tarball (needs no network file),
+      # which proves `exclude` in Cargo.toml leaves everything required to build.
+      - name: Package and verify build
+        run: cargo package --locked
+
+  # The declared `rust-version` in Cargo.toml is 1.98 (AArch64 dot-product intrinsics);
+  # keep this toolchain pin in sync with it.
+  msrv:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@1.98.0
+        with:
+          targets: aarch64-unknown-linux-gnu
+      - uses: Swatinem/rust-cache@v2
+      - run: cargo build --lib --bins
+      - run: cargo check --lib --bins --features neon-dotprod --target aarch64-unknown-linux-gnu
