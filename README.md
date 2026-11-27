@@ -29,6 +29,36 @@ The engine responds with `uciok`, `readyok`, and then `bestmove`. Enter `quit` a
 the `bestmove` line. A UCI chess GUI can use the built executable directly.
 [CI binary downloads](docs/binaries.md) are also available.
 
+## Install from crates.io
+
+After a crates.io release is published, install the executable with Rust 1.98 or newer:
+
+```bash
+cargo install stockcrab
+```
+
+The NNUE network is distributed separately by Stockfish. Download it from
+[Stockfish's server](https://tests.stockfishchess.org/api/nn/nn-684d0e60e71d.nnue)
+(use `curl.exe` in place of `curl` in PowerShell):
+
+```bash
+curl -fLO https://tests.stockfishchess.org/api/nn/nn-684d0e60e71d.nnue
+```
+
+Verify that the file's SHA-256 is
+`684d0e60e71dc6a995cc5026fa623d46b96ae52931894609e981914cf3dd3d94`,
+using `sha256sum nn-684d0e60e71d.nnue` on Linux,
+`shasum -a 256 nn-684d0e60e71d.nnue` on macOS, or
+`Get-FileHash nn-684d0e60e71d.nnue -Algorithm SHA256` in PowerShell.
+Put the verified file next to the installed `stockcrab` executable. With Cargo's default
+install location, that is `~/.cargo/bin` on Unix or `%USERPROFILE%\.cargo\bin`
+on Windows. The engine also finds the network in its working directory, or you
+can set the UCI `EvalFile` option to its full path.
+
+For a faster build tailored to the machine running the engine, install with
+`RUSTFLAGS="-C target-cpu=native" cargo install --force stockcrab` on Unix. Plain
+`cargo install` uses the target's baseline CPU features.
+
 ## Building
 
 Stockcrab needs Rust 1.98 or newer. The NNUE kernels are selected from the target CPU at compile
