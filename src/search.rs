@@ -397,7 +397,7 @@ fn is_shuffling(mv: Move, ss: *const Stack, pos: &Position) -> bool {
         }
 
         // Early exit for low plies from null or low ply
-        if pos.plies_from_null() < 6 || (*ss).ply < 20 {
+        if pos.rep_window() < 6 || (*ss).ply < 20 {
             return false;
         }
 
@@ -1132,12 +1132,8 @@ impl Worker {
         }
 
         // Dampen main history with every new root position
-        for color in 0..2 {
-            // SAFETY: color is 0 or 1 and main_history has 2 rows.
-            let hist = unsafe { self.main_history.get_unchecked_mut(color) };
-            for i in 0..hist.len() {
-                // SAFETY: i < hist.len() by the loop bound.
-                let entry = unsafe { hist.get_unchecked_mut(i) };
+        for hist in &mut *self.main_history {
+            for entry in hist {
                 let val = entry.get() as i32;
                 entry.set((val * 729 / 1024) as i16);
             }
@@ -1172,7 +1168,7 @@ impl Worker {
             // principal variation can be detected (followPV).
             for (i, rm) in self.root_moves.iter_mut().enumerate() {
                 rm.previous_score = rm.score;
-                rm.previous_pv = rm.pv.clone();
+                rm.previous_pv.clone_from(&rm.pv);
                 rm.previous_score_exact = i < multi_pv;
             }
 
@@ -1209,7 +1205,8 @@ impl Worker {
                 // Read from the RootMove itself: the list is re-sorted inside the
                 // MultiPV loop, so a positional lookup would attribute one move's
                 // previous PV to a different move and perturb the node counts.
-                self.last_iteration_idx_pv = self.root_moves[pv_idx].previous_pv.clone();
+                self.last_iteration_idx_pv
+                    .clone_from(&self.root_moves[pv_idx].previous_pv);
 
                 // Reset UCI info selDepth
                 // Reset UCI info selDepth for each depth and each PV line
@@ -1353,9 +1350,9 @@ impl Worker {
 
             let stop_now = self.should_stop();
 
-            // C++ has no completedDepth (it uses rootDepth), but the port's best-thread
-            // selection and time management read completed_depth, so keep it updated
-            // when the search was not aborted.
+            // completedDepth was removed upstream (rootDepth is used instead), but the
+            // Rust threading still relies on completed_depth for best-thread selection
+            // and time management, so we keep it updated when the search wasn't aborted.
             if !stop_now {
                 self.completed_depth = self.root_depth;
             }
@@ -3180,11 +3177,7 @@ impl Worker {
                 // Step 6. Pruning
                 if !is_loss(best_value) {
                     // Futility pruning
-                    if !gives_check
-                        && Some(move_.to_sq()) != prev_sq
-                        && !is_loss(futility_base)
-                        && move_.move_type() != MoveType::Promotion
-                    {
+                    if !gives_check && Some(move_.to_sq()) != prev_sq && !is_loss(futility_base) {
                         if move_count > 2 {
                             continue;
                         }
@@ -3319,27 +3312,25 @@ impl Worker {
         // the correction-history pointers of ss-1/-3/-5 target retained Cell entries set by an ancestor's do_move,
         // and moved_pc < 16, to < 64 index the [PIECE_NB][SQUARE_NB] table (prefetch only).
         unsafe {
-            if !ss.is_null() {
-                let to = mv.to_sq() as usize;
-                let prev1 = (*ss.offset(-1)).continuation_correction_history;
-                let prev3 = (*ss.offset(-3)).continuation_correction_history;
-                let prev5 = (*ss.offset(-5)).continuation_correction_history;
-                crate::misc::prefetch(
-                    self.continuation_correction_entry(prev1)
-                        .get_unchecked(moved_pc as usize)
-                        .get_unchecked(to) as *const _,
-                );
-                crate::misc::prefetch(
-                    self.continuation_correction_entry(prev3)
-                        .get_unchecked(moved_pc as usize)
-                        .get_unchecked(to) as *const _,
-                );
-                crate::misc::prefetch(
-                    self.continuation_correction_entry(prev5)
-                        .get_unchecked(moved_pc as usize)
-                        .get_unchecked(to) as *const _,
-                );
-            }
+            let to = mv.to_sq() as usize;
+            let prev1 = (*ss.offset(-1)).continuation_correction_history;
+            let prev3 = (*ss.offset(-3)).continuation_correction_history;
+            let prev5 = (*ss.offset(-5)).continuation_correction_history;
+            crate::misc::prefetch(
+                self.continuation_correction_entry(prev1)
+                    .get_unchecked(moved_pc as usize)
+                    .get_unchecked(to) as *const _,
+            );
+            crate::misc::prefetch(
+                self.continuation_correction_entry(prev3)
+                    .get_unchecked(moved_pc as usize)
+                    .get_unchecked(to) as *const _,
+            );
+            crate::misc::prefetch(
+                self.continuation_correction_entry(prev5)
+                    .get_unchecked(moved_pc as usize)
+                    .get_unchecked(to) as *const _,
+            );
         }
 
         // Increment node count for each move made
@@ -3388,20 +3379,18 @@ impl Worker {
         // SAFETY: `ss` is non-null and a valid Stack entry (see above); in_check/capture are bool (0/1), moved_pc < 16 and
         // to < 64 index the history tables, whose pointers stay valid as they live in shared state / this worker.
         unsafe {
-            if !ss.is_null() {
-                (*ss).current_move = mv;
-                // SAFETY: in_check is bool (0-1), capture is bool (0-1), piece is 0-15, square is 0-63
-                (*ss).continuation_history =
-                    self.continuation_history()
-                        .get_unchecked((*ss).in_check as usize)
-                        .get_unchecked(capture as usize)
-                        .get_unchecked(moved_pc as usize)
-                        .get_unchecked(mv.to_sq() as usize) as *const _;
-                (*ss).continuation_correction_history =
-                    self.continuation_correction_history
-                        .get_unchecked(moved_pc as usize)
-                        .get_unchecked(mv.to_sq() as usize) as *const _;
-            }
+            (*ss).current_move = mv;
+            // SAFETY: in_check is bool (0-1), capture is bool (0-1), piece is 0-15, square is 0-63
+            (*ss).continuation_history =
+                self.continuation_history()
+                    .get_unchecked((*ss).in_check as usize)
+                    .get_unchecked(capture as usize)
+                    .get_unchecked(moved_pc as usize)
+                    .get_unchecked(mv.to_sq() as usize) as *const _;
+            (*ss).continuation_correction_history =
+                self.continuation_correction_history
+                    .get_unchecked(moved_pc as usize)
+                    .get_unchecked(mv.to_sq() as usize) as *const _;
         }
     }
 
@@ -3486,7 +3475,8 @@ impl Worker {
             let shared = &self.shared_state.shared_histories;
 
             // Read from the shared correction histories
-            let pcv = shared.pawn_correction_entry(pos).pawn.get() as i32;
+            let queens_exist = usize::from(pos.pieces_pt::<{ PieceType::Queen as u8 }>() != 0);
+            let pcv = shared.pawn_correction_entry(pos).pawn[queens_exist].get() as i32;
             let micv = shared.minor_piece_correction_entry(pos).minor.get() as i32;
             let wnpcv = shared
                 .nonpawn_correction_entry_white(pos)
@@ -3543,7 +3533,8 @@ impl Worker {
             const NON_PAWN_WEIGHT: i32 = 186;
 
             // Use shared correction histories with atomic updates
-            shared.pawn_correction_entry(pos).pawn.update(bonus);
+            let queens_exist = usize::from(pos.pieces_pt::<{ PieceType::Queen as u8 }>() != 0);
+            shared.pawn_correction_entry(pos).pawn[queens_exist].update(bonus);
             shared
                 .minor_piece_correction_entry(pos)
                 .minor

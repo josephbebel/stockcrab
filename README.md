@@ -10,6 +10,25 @@ Stockcrab is a derivative work of Stockfish and is distributed under the same li
 General Public License version 3 or later. All credit for the engine and its strength belongs to
 the [Stockfish developers](AUTHORS).
 
+The current reference is Stockfish `88337401b7a4d5724611cd1ac32bdacf9e778ebd` with
+`nn-684d0e60e71d.nnue`. At Hash 16 and Threads 1, the depth-13 bench matches C++ at
+1,128,273 nodes and all 639 search records. [Upstream sync notes](docs/upstream-sync.md)
+
+## Quickstart
+
+From a source checkout with Rust 1.98 or newer:
+
+```bash
+scripts/fetch-net.sh
+make build-native
+./target/release/stockcrab
+```
+
+Enter `uci`, `isready`, `position startpos`, and `go depth 8`, one command per line.
+The engine responds with `uciok`, `readyok`, and then `bestmove`. Enter `quit` after
+the `bestmove` line. A UCI chess GUI can use the built executable directly.
+[CI binary downloads](docs/binaries.md) are also available.
+
 ## Building
 
 Stockcrab needs Rust 1.98 or newer. The NNUE kernels are selected from the target CPU at compile
@@ -57,8 +76,8 @@ The UCI options are those of Stockfish, including `Threads`, `Hash`, `MultiPV`, 
 
 ## Strength and speed
 
-Stockcrab (`make build-native`) against C++ Stockfish at the same commit built with
-`make profile-build ARCH=x86-64-avx512icl` (GCC, PGO), on an AMD Ryzen 9 9950X3D. Games use the
+Recorded at Stockfish `3e8fde75`: Stockcrab (`make build-native`) against C++ at the same commit
+built with `make profile-build ARCH=x86-64-avx512icl` (GCC, PGO), on an AMD Ryzen 9 9950X3D. Games use the
 UHO_Lichess_4852_v1 openings, each played with both colours, and fishtest's adjudication rules;
 error bars are 95% intervals.
 

@@ -21,8 +21,8 @@
 //! port keeps them in one module because Rust has no header/implementation
 //! split to mirror.
 //!
-//! Tables live in `OnceLock`s filled by [`init`], which must be called before
-//! anything else here. C++ builds the equivalents as `constexpr` data or in
+//! Attack tables are initialized on first use or by an explicit [`init`] call.
+//! C++ builds the equivalents as `constexpr` data or in
 //! `Attacks::init()`.
 
 use crate::types::*;
@@ -145,7 +145,15 @@ static RANK_ATTACKS: [[u8; 64]; 8] = build_rank_attacks();
 static INIT_ONCE: Once = Once::new();
 
 #[inline(always)]
+fn ensure_initialized() {
+    if !INIT_ONCE.is_completed() {
+        init();
+    }
+}
+
+#[inline(always)]
 fn get_pseudo_attacks() -> &'static [[Bitboard; SQUARE_NB]; PIECE_TYPE_NB] {
+    ensure_initialized();
     // SAFETY: `init()` writes the table before any game logic starts, and it
     // remains immutable for the lifetime of the process.
     unsafe {
@@ -206,6 +214,7 @@ pub fn pawn_attacks(color: Color, b: Bitboard) -> Bitboard {
 /// This matches the C++ `attacks_bb<PAWN>`(square, color) function.
 #[inline(always)]
 pub fn pawn_attacks_from_square(sq: Square, color: Color) -> Bitboard {
+    ensure_initialized();
     // SAFETY: `init()` fills the table before any reader runs; a Color is 0 or 1 and a Square is below 64, so both
     // indices are in bounds.
     unsafe {
@@ -334,6 +343,7 @@ fn build_dual_magics() -> AlignedDualMagics {
 
 #[inline(always)]
 fn get_dual_magics() -> &'static AlignedDualMagics {
+    ensure_initialized();
     // SAFETY: `init()` writes the table before any game logic starts, and the
     // storage remains immutable for the lifetime of the process.
     unsafe { &*core::ptr::addr_of!(DUAL_MAGICS_STORAGE).cast::<AlignedDualMagics>() }
@@ -551,6 +561,7 @@ pub fn square_bb_pub(s: Square) -> Bitboard {
 /// aligned. Use `between_bb_pub` for the segment.
 #[inline(always)]
 pub fn line_bb_pub(s1: Square, s2: Square) -> Bitboard {
+    ensure_initialized();
     // SAFETY: `init()` writes the table before any game logic starts, and it
     // remains immutable for the lifetime of the process.
     unsafe {
@@ -562,6 +573,7 @@ pub fn line_bb_pub(s1: Square, s2: Square) -> Bitboard {
 /// Between bitboard from s1 (exclusive) to s2 (inclusive).
 #[inline(always)]
 pub fn between_bb_pub(s1: Square, s2: Square) -> Bitboard {
+    ensure_initialized();
     // SAFETY: `init()` writes the table before any game logic starts, and it
     // remains immutable for the lifetime of the process.
     unsafe {
@@ -574,6 +586,7 @@ pub fn between_bb_pub(s1: Square, s2: Square) -> Bitboard {
 /// C++: RayPassBB\[s1\]\[s2\] = attacks_bb(pt, s1, 0) & (attacks_bb(pt, s2, square_bb(s1)) | s2);
 #[inline(always)]
 pub fn ray_pass_bb(s1: Square, s2: Square) -> Bitboard {
+    ensure_initialized();
     // SAFETY: `init()` writes the table before any game logic starts, and it
     // remains immutable for the lifetime of the process.
     unsafe {
@@ -585,6 +598,7 @@ pub fn ray_pass_bb(s1: Square, s2: Square) -> Bitboard {
 /// Full diagonal through the square, including the square itself.
 #[inline(always)]
 pub fn diag_bb(s: Square) -> Bitboard {
+    ensure_initialized();
     // SAFETY: init() initializes this immutable table before game logic starts.
     unsafe { (*core::ptr::addr_of!(DIAG_BB_STORAGE).cast::<[Bitboard; SQUARE_NB]>())[s as usize] }
 }
@@ -592,6 +606,7 @@ pub fn diag_bb(s: Square) -> Bitboard {
 /// Full antidiagonal through the square, including the square itself.
 #[inline(always)]
 pub fn antidiag_bb(s: Square) -> Bitboard {
+    ensure_initialized();
     // SAFETY: init() initializes this immutable table before game logic starts.
     unsafe {
         (*core::ptr::addr_of!(ANTIDIAG_BB_STORAGE).cast::<[Bitboard; SQUARE_NB]>())[s as usize]
@@ -708,12 +723,12 @@ unsafe fn dual_attacks(magic: &DualMagic, occupied: Bitboard) -> (Bitboard, Bitb
 
     // Lane 0: rook attacks (file only); lanes 1 and 2: bishop attacks. Permuting
     // lanes (0, 2, 1, 3) puts the antidiagonal next to the diagonal, so lane 1
-    // of the OR is the combined bishop attack.
+    // of the OR is the combined bishop attack (upstream 205f0052).
     let permuted = _mm256_permute4x64_epi64::<0b11_01_10_00>(result);
     let rook_bishop = _mm256_or_si256(result, permuted);
     let bishop = _mm_extract_epi64::<1>(_mm256_castsi256_si128(rook_bishop)) as u64;
     // The rook's file attack is lane 0 of `result`, read straight from it so the
-    // OR above is not on this path's critical chain.
+    // OR above is not on this path's critical chain (upstream 82d73d0a).
     let rook =
         (_mm_cvtsi128_si64(_mm256_castsi256_si128(result)) as u64).wrapping_add(rank_attacks);
 
@@ -829,7 +844,12 @@ pub fn popcount(bb: Bitboard) -> u32 {
 /// Least significant bit index.
 #[inline(always)]
 pub fn lsb(bb: Bitboard) -> Square {
-    debug_assert!(bb != 0);
+    lsb_nonzero(core::num::NonZeroU64::new(bb).expect("lsb requires a nonzero bitboard"))
+}
+
+/// Least significant bit index of a nonzero bitboard.
+#[inline(always)]
+pub fn lsb_nonzero(bb: core::num::NonZeroU64) -> Square {
     Square::from(bb.trailing_zeros() as u8)
 }
 
@@ -838,7 +858,7 @@ pub fn lsb(bb: Bitboard) -> Square {
 /// Returns the index of the most significant set bit of a non-zero bitboard.
 #[inline(always)]
 pub fn msb(bb: Bitboard) -> Square {
-    debug_assert!(bb != 0);
+    assert!(bb != 0, "msb requires a nonzero bitboard");
     Square::from(63 - bb.leading_zeros() as u8)
 }
 

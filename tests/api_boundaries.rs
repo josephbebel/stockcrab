@@ -103,3 +103,12 @@ fn perft_deeper_than_the_state_history_is_refused() {
     );
     assert_eq!(stockcrab::perft::perft(&mut start, 3), 8902);
 }
+
+#[test]
+fn zero_bitboard_scans_panic() {
+    use stockcrab::bitboard::{lsb, msb, pop_lsb};
+
+    assert!(std::panic::catch_unwind(|| lsb(0)).is_err());
+    assert!(std::panic::catch_unwind(|| msb(0)).is_err());
+    assert!(std::panic::catch_unwind(|| pop_lsb(&mut 0)).is_err());
+}

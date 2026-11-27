@@ -90,6 +90,10 @@ const CASES: &[(&str, Option<&str>)] = &[
         Some("Invalid FEN. Expected castling rights. Got: Z"),
     ),
     (
+        "rnbqkbnr/pppppppp/8/8/8/8/PPPPPPPP/RNBQKBNR w KQkz - 0 1",
+        Some("Invalid FEN. Expected castling rights. Got: z"),
+    ),
+    (
         "4k3/8/8/2pP4/8/8/8/4K3 w- c6 0 2",
         Some("Invalid FEN. Expected whitespace after side to move."),
     ),

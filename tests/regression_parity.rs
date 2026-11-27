@@ -34,7 +34,7 @@
 //!   1. A long move replay keeps castling rights, the ep square and rule50
 //!      (the `StateInfo` ring buffer).
 //!   2. En-passant legality tests the capturing side's king.
-//!   3. NNUE evaluations (layer stack and output scaling) match C++ golden
+//!   3. Raw NNUE evaluations (including the layer stack) match C++ golden
 //!      values.
 //!   4. `Position::do_move` fills `DirtyThreats`, so incremental NNUE updates
 //!      match a full refresh.
@@ -815,9 +815,9 @@ fn en_passant_square_legality() {
 // with a freshly cleared refresh cache for the oracle so the second number really
 // is computed from scratch.
 //
-// The layer stack and output scaling below the accumulator (`propagate`) affect
+// The layer stack below the accumulator (`propagate`) affects
 // the incremental and refresh paths identically, so the differential test cannot
-// see them. `nnue_eval_matches_cpp_golden_values` covers them instead, with
+// see it. `nnue_eval_matches_cpp_golden_values` covers it instead, with
 // evaluations taken from C++ Stockfish's `eval` command ("internal units" line).
 //
 // The two tests are complementary: a wrong threat update fails both incremental
@@ -955,24 +955,24 @@ fn nnue_incremental_matches_full_refresh_at_depth() {
 }
 
 /// Golden NNUE evaluations from upstream C++ Stockfish's `eval` command
-/// ("NNUE evaluation <v> (side to move, internal units)"), i.e. the network
-/// output after the output scaling. These check layer stack and output scaling
-/// parity, which the incremental-vs-refresh test above cannot see; every target
-/// runs them against whichever kernel it compiles.
+/// ("NNUE evaluation <v> (side to move, internal units)"), i.e. the raw network
+/// output before material and rule-50 scaling. These check layer stack parity,
+/// which the incremental-vs-refresh test above cannot see; every target runs
+/// them against whichever kernel it compiles.
 /// Re-derived whenever the default network changes; these are for
-/// `nn-bddd9d57eb87.nnue` (SFNNv20).
+/// `nn-684d0e60e71d.nnue` (upstream 88337401, SFNNv20).
 const NNUE_GOLDEN: &[(&str, Value)] = &[
-    (START_FEN, 45),
-    (KIWIPETE_FEN, -625),
-    ("8/2p5/3p4/KP5r/1R3p1k/8/4P1P1/8 w - - 0 11", 20),
-    ("8/1p3pp1/7p/5P1P/2k3P1/8/2K2P2/8 w - - 0 1", -1031),
+    (START_FEN, 121),
+    (KIWIPETE_FEN, -490),
+    ("8/2p5/3p4/KP5r/1R3p1k/8/4P1P1/8 w - - 0 11", 34),
+    ("8/1p3pp1/7p/5P1P/2k3P1/8/2K2P2/8 w - - 0 1", -818),
     (
         "k7/2n1n3/1nbNbn2/2NbRBn1/1nbRQR2/2NBRBN1/3N1N2/7K w - - 0 1",
-        6577,
+        5115,
     ),
     (
         "4rrk1/pp1n3p/3q2pQ/2p1pb2/2PP4/2P3N1/P2B2PP/4RRK1 b - - 7 19",
-        -155,
+        -91,
     ),
 ];
 
@@ -1161,7 +1161,8 @@ fn worker_clear_uses_cpp_history_init_values() {
     worker.main_history[0][0].set(1234);
     worker.capture_history[1][2][3].set(1234);
     shared.pawn_history()[0][1][2].set(1234);
-    shared.correction_history()[0].pawn.set(1000);
+    shared.correction_history()[0].pawn[0].set(1000);
+    shared.correction_history()[0].pawn[1].set(1000);
     for (p1, s1, p2, s2) in [(0usize, 0usize, 0usize, 0usize), (5, 17, 9, 42)] {
         // Within the correction-history limit (1024), which `set` asserts in debug.
         worker.continuation_correction_history[p1][s1][p2][s2].set(1000);
@@ -1227,7 +1228,13 @@ fn worker_clear_uses_cpp_history_init_values() {
     let corr_size = shared.correction_history().get_size();
     for i in [0usize, 1, corr_size / 2, corr_size - 1] {
         let bundle = &shared.correction_history()[i];
-        assert_eq!(bundle.pawn.get(), -5, "correctionHistory[{i}].pawn");
+        for (queens_exist, pawn) in bundle.pawn.iter().enumerate() {
+            assert_eq!(
+                pawn.get(),
+                -5,
+                "correctionHistory[{i}].pawn[{queens_exist}]"
+            );
+        }
         assert_eq!(bundle.minor.get(), -5, "correctionHistory[{i}].minor");
         assert_eq!(
             bundle.non_pawn_white.get(),

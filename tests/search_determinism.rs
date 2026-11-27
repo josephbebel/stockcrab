@@ -32,8 +32,8 @@
 //! feature. Nothing here is #[ignore]d.
 //!
 //! `expected_move` is the move the *C++ reference engine* plays at that depth,
-//! not the move a human would pick; do not "fix" an expectation to match a comment
-//! naming a different move.
+//! not the move a human would pick, and the trailing comments naming a different
+//! move are historical annotations -- do not "fix" an expectation to match them.
 //! Any Elo-affecting upstream commit can legitimately shift these. When one does,
 //! re-derive the value from the C++ engine rather than from stockcrab alone:
 //!
@@ -45,8 +45,8 @@
 //! Sending `quit` on the same line aborts the search and yields a bogus
 //! `depth 0 ... nodes 0` result, so keep stdin open until `bestmove` appears.
 //!
-//! The expectations are those of the C++ engine at the commit pinned in
-//! `config/upstream.env`, with its default network.
+//! Expectations last re-derived from C++ at upstream `88337401` (network `nn-684d0e60e71d`).
+//! Each position was searched independently with stdin kept open until `bestmove`.
 
 mod common;
 
@@ -146,7 +146,7 @@ fn search_bishop_retreat_best_move() {
         name: "Bishop Retreat - Best Move",
         fen: "r1b1kb1r/pppp1ppp/2n2q2/4n3/2B1P3/2N5/PPPP1PPP/R1BQK2R w KQkq - 0 1",
         depth: 10,
-        expected_move: "c4b3",
+        expected_move: "c3d5",
         expected_eval: Some(30000),
     };
     run_search_test(&test);
@@ -195,7 +195,7 @@ fn search_opening_italian_game() {
         name: "Italian Game - Common Line",
         fen: "r1bqkbnr/pppp1ppp/2n5/4p3/2B1P3/5N2/PPPP1PPP/RNBQK2R b KQkq - 0 1",
         depth: 18,
-        expected_move: "g8f6",
+        expected_move: "f8c5",
         expected_eval: Some(0), // Roughly equal
     };
     run_search_test(&test);
@@ -210,7 +210,7 @@ fn search_opening_sicilian_najdorf() {
         name: "Sicilian Najdorf",
         fen: "rnbqkb1r/1p2pppp/p2p1n2/8/3NP3/2N5/PPP2PPP/R1BQKB1R w KQkq - 0 1",
         depth: 18,
-        expected_move: "c1e3",   // f4 or Be3 are main lines
+        expected_move: "f1e2",   // f4 or Be3 are main lines
         expected_eval: Some(30), // Slight edge for White
     };
     run_search_test(&test);
@@ -225,7 +225,7 @@ fn search_opening_queens_gambit() {
         name: "Queen's Gambit Declined",
         fen: "rnbqkb1r/ppp1pppp/5n2/3p4/2PP4/5N2/PP2PPPP/RNBQKB1R b KQkq - 0 1",
         depth: 18,
-        expected_move: "e7e6", // e6 is main line
+        expected_move: "e7e6",
         expected_eval: Some(0),
     };
     run_search_test(&test);
@@ -356,7 +356,7 @@ fn search_endgame_rook_endgame() {
         name: "Rook Endgame - Lucena Position",
         fen: "1K6/1P6/8/8/8/8/r7/k7 w - - 0 1",
         depth: 25,
-        expected_move: "b8c8",
+        expected_move: "b8c7",
         expected_eval: Some(1000),
     };
     run_search_test(&test);
@@ -443,7 +443,7 @@ fn search_en_passant_capture() {
         name: "En Passant Available",
         fen: "rnbqkbnr/ppp1p1pp/8/3pPp2/8/8/PPPP1PPP/RNBQKBNR w KQkq f6 0 1",
         depth: 18,
-        expected_move: "d2d4",
+        expected_move: "c2c3",
         expected_eval: Some(50),
     };
     run_search_test(&test);
@@ -492,7 +492,7 @@ fn search_avoid_threefold_repetition() {
         name: "Avoid Repetition when Winning",
         fen: "8/8/8/4k3/8/8/3K4/R7 w - - 0 1",
         depth: 20,
-        expected_move: "d2d3",
+        expected_move: "d2e3",
         expected_eval: Some(500),
     };
     run_search_test(&test);
@@ -530,7 +530,7 @@ fn search_pawn_structure_evaluation() {
         name: "Pawn Structure - Isolated Pawn",
         fen: "r1bqkb1r/pp1p1ppp/2n2n2/2p1p3/2P1P3/2N2N2/PP1P1PPP/R1BQKB1R w KQkq - 0 1",
         depth: 20,
-        expected_move: "d2d3",
+        expected_move: "g2g3",
         expected_eval: Some(15),
     };
     run_search_test(&test);

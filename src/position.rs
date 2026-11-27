@@ -527,7 +527,7 @@ pub struct StateInfo {
     pub non_pawn_material: [Value; COLOR_NB],
     pub castling_rights: CastlingRights,
     pub rule50: i32,
-    pub plies_from_null: i32,
+    pub rep_window: i32,
     pub ep_square: Option<Square>,
 
     // Not copied when making a move (recomputed)
@@ -556,7 +556,7 @@ impl Default for StateInfo {
             non_pawn_material: [VALUE_ZERO; COLOR_NB],
             castling_rights: CastlingRights::NO_CASTLING,
             rule50: 0,
-            plies_from_null: 0,
+            rep_window: 0,
             ep_square: None,
             key: 0,
             checkers_bb: 0,
@@ -1026,7 +1026,7 @@ impl Position {
             if i >= bytes.len() {
                 break;
             }
-            let mut token = bytes[i];
+            let token = bytes[i];
             i += 1;
 
             if token.is_ascii_whitespace() {
@@ -1048,67 +1048,43 @@ impl Position {
                 ));
             }
 
-            let mut rsq: Option<Square> = None;
-            let mut ksq: Option<Square> = None;
-            let c = if token.is_ascii_lowercase() {
-                Color::Black
-            } else {
-                Color::White
-            };
-            let rook = make_piece(c, PieceType::Rook);
-            let king = make_piece(c, PieceType::King);
-
-            token = token.to_ascii_uppercase();
-
-            if token == b'K' || token == b'Q' {
-                let dir: i32 = if token == b'K' { -1 } else { 1 };
-                let start = relative_square(
-                    c,
-                    if token == b'K' {
-                        Square::SQ_H1
-                    } else {
-                        Square::SQ_A1
-                    },
-                ) as i32;
-                // Look for a rook and a king for the castling; the king must come
-                // later and only the first rook is noted. When castling rights are
-                // available the king is always between files B and G inclusive, so
-                // the last square never needs checking.
-                for step in 0..7 {
-                    let sq = Square::from((start + dir * step) as u8);
-                    let pc = self.piece_on(sq);
-                    if pc == king {
-                        ksq = Some(sq);
-                        break;
-                    } else if pc == rook && rsq.is_none() {
-                        rsq = Some(sq);
-                    }
-                }
-            } else if (b'A'..=b'H').contains(&token) {
-                let rsq_candidate =
-                    make_square(File::from(token - b'A'), relative_rank(c, Rank::R1));
-                if self.piece_on(rsq_candidate) == rook {
-                    rsq = Some(rsq_candidate);
-                }
-
-                // If the castling rights are available the king must always be between files 2 and 7 inclusive.
-                // (The king count was validated above, so the king square exists.)
-                let sq = self.square_of(c, PieceType::King);
-                if relative_rank_sq(c, sq) == Rank::R1
-                    && file_of(sq) >= File::B
-                    && file_of(sq) <= File::G
-                {
-                    ksq = Some(sq);
-                }
-            } else {
+            let upper = token.to_ascii_uppercase();
+            if upper != b'K' && upper != b'Q' && !(b'A'..=b'H').contains(&upper) {
                 return Err(PositionSetError::new(format!(
                     "Invalid FEN. Expected castling rights. Got: {}",
                     echo_byte(token)
                 )));
             }
 
-            // Only apply castling rights if they can be valid.
-            if let (Some(_), Some(rsq)) = (ksq, rsq) {
+            let c = if token.is_ascii_lowercase() {
+                Color::Black
+            } else {
+                Color::White
+            };
+            let ksq = self.square_of(c, PieceType::King);
+            if relative_rank_sq(c, ksq) != Rank::R1
+                || file_of(ksq) == File::A
+                || file_of(ksq) == File::H
+            {
+                continue;
+            }
+
+            let mut rooks = self.pieces_color_types(c, &[PieceType::Rook]);
+            if upper == b'K' {
+                rooks &= bitboard::between_bb_pub(ksq, relative_square(c, Square::SQ_H1));
+            } else if upper == b'Q' {
+                rooks &= bitboard::between_bb_pub(ksq, relative_square(c, Square::SQ_A1));
+            } else {
+                let rsq = make_square(File::from(upper - b'A'), relative_rank(c, Rank::R1));
+                rooks &= bitboard::square_bb_pub(rsq);
+            }
+
+            if rooks != 0 {
+                let rsq = if upper == b'K' {
+                    bitboard::msb(rooks)
+                } else {
+                    bitboard::lsb(rooks)
+                };
                 self.set_castling_right(c, rsq);
             }
         }
@@ -2123,7 +2099,7 @@ impl Position {
         // capture or a pawn move.
         self.game_ply += 1;
         st.rule50 += 1;
-        st.plies_from_null += 1;
+        st.rep_window = (st.rep_window + 1).min(MAX_HIST as i32 - 1);
 
         let dpps = &mut dirties.dirty_pawn_pairs;
         let dts = &mut dirties.dirty_threats;
@@ -2224,6 +2200,7 @@ impl Position {
 
             // Reset rule 50 counter
             st.rule50 = 0;
+            st.rep_window = 0;
         } else {
             dp.remove_sq = None;
         }
@@ -2323,6 +2300,7 @@ impl Position {
 
             // Reset rule 50 draw counter
             st.rule50 = 0;
+            st.rep_window = 0;
         } else {
             // SAFETY: us is Color (0 or 1), non_pawn_key has 2 elements
             unsafe {
@@ -2382,7 +2360,7 @@ impl Position {
         // occurrence of the same position, negative in the 3-fold case, or zero
         // if the position was not repeated.
         st.repetition = 0;
-        let end = st.rule50.min(st.plies_from_null).min(MAX_HIST as i32 - 1);
+        let end = st.rep_window;
         if end >= 4 {
             let mut i = 4;
             while i <= end {
@@ -2514,7 +2492,7 @@ impl Position {
             }
             // Toggle side in key
             self.st_mut().key ^= ZOBRIST_SIDE;
-            self.st_mut().plies_from_null = 0;
+            self.st_mut().rep_window = 0;
             self.st_mut().captured_piece = Piece::NoPiece;
             self.st_mut().repetition = 0;
         }
@@ -2736,10 +2714,10 @@ impl Position {
         self.game_ply
     }
 
-    /// The number of plies since the last null move (or since the position was set).
+    /// The retained repetition window since the last irreversible move, null move, or FEN.
     #[inline(always)]
-    pub fn plies_from_null(&self) -> i32 {
-        self.st().plies_from_null
+    pub fn rep_window(&self) -> i32 {
+        self.st().rep_window
     }
 
     /// Whether the position uses Chess960 castling.
@@ -2788,11 +2766,7 @@ impl Position {
     /// Tests if the position has a move which draws by repetition.
     /// This function accurately matches the outcome of is_draw() over all legal moves.
     pub fn upcoming_repetition(&self, ply: i32) -> bool {
-        let end = self
-            .st()
-            .rule50
-            .min(self.st().plies_from_null)
-            .min(MAX_HIST as i32 - 1);
+        let end = self.rep_window();
         if end < 3 {
             return false;
         }
@@ -2851,11 +2825,7 @@ impl Position {
     /// Tests whether there has been at least one repetition
     /// of positions since the last capture or pawn move.
     pub fn has_repeated(&self) -> bool {
-        let end = self
-            .st()
-            .rule50
-            .min(self.st().plies_from_null)
-            .min(MAX_HIST as i32 - 1);
+        let end = self.rep_window();
         (0..=end - 4).any(|i| self.st_back(i as usize).repetition != 0)
     }
 

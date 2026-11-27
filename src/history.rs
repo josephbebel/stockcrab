@@ -155,9 +155,9 @@ impl<const D: i32> Default for AtomicStatsEntry<D> {
     }
 }
 
-/// `AtomicI16` cells per `UnifiedCorrectionEntry` (one bundle of four) and per
+/// `AtomicI16` cells per `UnifiedCorrectionEntry` (one bundle of five) and per
 /// `AtomicPawnHistoryEntry`.
-const CELLS_PER_CORRECTION_ENTRY: usize = 4;
+const CELLS_PER_CORRECTION_ENTRY: usize = 5;
 const CELLS_PER_PAWN_ENTRY: usize = PIECE_NB * SQUARE_NB;
 const _: () = assert!(
     core::mem::size_of::<UnifiedCorrectionEntry>()
@@ -174,7 +174,7 @@ const _: () = assert!(
 /// # Safety
 ///
 /// `first..first + n` must lie inside one allocation of `AtomicI16`-backed cells (an
-/// `AtomicStatsEntry`, or a `CorrectionBundle`, which is `repr(C)` over four of them).
+/// `AtomicStatsEntry`, or a `CorrectionBundle`, which is `repr(C)` over five of them).
 #[inline]
 unsafe fn fill_cells(first: *const AtomicI16, n: usize, value: i16) {
     // SAFETY: the caller guarantees the range is `n` initialised `AtomicI16`s in one allocation;
@@ -195,7 +195,8 @@ unsafe fn fill_cells(first: *const AtomicI16, n: usize, value: i16) {
 #[derive(Debug, Zeroable)]
 #[repr(C)]
 pub struct CorrectionBundle {
-    pub pawn: AtomicStatsEntry<CORRECTION_HISTORY_LIMIT>,
+    /// Indexed by whether either side has a queen.
+    pub pawn: [AtomicStatsEntry<CORRECTION_HISTORY_LIMIT>; 2],
     pub minor: AtomicStatsEntry<CORRECTION_HISTORY_LIMIT>,
     pub non_pawn_white: AtomicStatsEntry<CORRECTION_HISTORY_LIMIT>,
     pub non_pawn_black: AtomicStatsEntry<CORRECTION_HISTORY_LIMIT>,
@@ -204,7 +205,7 @@ pub struct CorrectionBundle {
 impl CorrectionBundle {
     pub const fn new() -> Self {
         CorrectionBundle {
-            pawn: AtomicStatsEntry::new(),
+            pawn: [AtomicStatsEntry::new(), AtomicStatsEntry::new()],
             minor: AtomicStatsEntry::new(),
             non_pawn_white: AtomicStatsEntry::new(),
             non_pawn_black: AtomicStatsEntry::new(),
@@ -495,57 +496,24 @@ impl SharedHistories {
             numa_total > 0 && thread_idx < numa_total,
             "invalid NUMA partition"
         );
-        // Clear correction history range
-        let corr_size = self.correction_history.get_size();
-        let corr_start = (thread_idx as u64 * corr_size as u64 / numa_total as u64) as usize;
-        let corr_end = if thread_idx + 1 == numa_total {
-            corr_size
-        } else {
-            ((thread_idx + 1) as u64 * corr_size as u64 / numa_total as u64) as usize
+        let partition = |size: usize| {
+            let boundary =
+                |index: usize| (index as u128 * size as u128 / numa_total as u128) as usize;
+            boundary(thread_idx)..boundary(thread_idx + 1)
         };
-        if corr_start < corr_end {
-            // SAFETY: `thread_idx < numa_total` (asserted), so `corr_start < corr_end <= corr_size`
-            // and the range is inside the table; the cells are `repr(C)` bundles of `AtomicI16`
-            // (four per entry).
-            unsafe {
-                let first = self
-                    .correction_history
-                    .data
-                    .as_ptr()
-                    .cast::<AtomicI16>()
-                    .add(corr_start * CELLS_PER_CORRECTION_ENTRY);
-                fill_cells(
-                    first,
-                    (corr_end - corr_start) * CELLS_PER_CORRECTION_ENTRY,
-                    correction_value,
-                );
+        for bundle in &self.correction_history.data[partition(self.correction_history.get_size())] {
+            for pawn in &bundle.pawn {
+                pawn.set(correction_value);
             }
+            bundle.minor.set(correction_value);
+            bundle.non_pawn_white.set(correction_value);
+            bundle.non_pawn_black.set(correction_value);
         }
-
-        // Clear pawn history range with the caller-supplied initial value (C++: -1338)
-        let pawn_size = self.pawn_history.get_size();
-        let pawn_start = (thread_idx as u64 * pawn_size as u64 / numa_total as u64) as usize;
-        let pawn_end = if thread_idx + 1 == numa_total {
-            pawn_size
-        } else {
-            ((thread_idx + 1) as u64 * pawn_size as u64 / numa_total as u64) as usize
-        };
-        if pawn_start < pawn_end {
-            // SAFETY: `thread_idx < numa_total` (asserted), so `pawn_start < pawn_end <= pawn_size`
-            // and the range is inside the table; each entry is `PIECE_NB * SQUARE_NB` transparent
-            // `AtomicI16` cells,.
-            unsafe {
-                let first = self
-                    .pawn_history
-                    .data
-                    .as_ptr()
-                    .cast::<AtomicI16>()
-                    .add(pawn_start * CELLS_PER_PAWN_ENTRY);
-                fill_cells(
-                    first,
-                    (pawn_end - pawn_start) * CELLS_PER_PAWN_ENTRY,
-                    pawn_value,
-                );
+        for entry in &self.pawn_history.data[partition(self.pawn_history.get_size())] {
+            for row in entry {
+                for cell in row {
+                    cell.set(pawn_value);
+                }
             }
         }
     }
@@ -903,7 +871,8 @@ mod tests {
             }
             for bundle in h.correction_history.data.iter() {
                 for cell in [
-                    &bundle.pawn,
+                    &bundle.pawn[0],
+                    &bundle.pawn[1],
                     &bundle.minor,
                     &bundle.non_pawn_white,
                     &bundle.non_pawn_black,
@@ -919,6 +888,21 @@ mod tests {
                 }
             }
         }
+    }
+
+    #[test]
+    fn clear_range_allows_overlapping_partitions_and_large_indices() {
+        let h = SharedHistories::new(1);
+        std::thread::scope(|scope| {
+            scope.spawn(|| h.clear_range(-5, -1338, 0, 1));
+            h.clear_range(-5, -1338, 0, 1);
+        });
+        h.clear_range(-6, -1339, usize::MAX - 2, usize::MAX);
+        h.clear_range(-7, -1340, usize::MAX - 1, usize::MAX);
+        for pawn in &h.correction_history.data.last().unwrap().pawn {
+            assert_eq!(pawn.get(), -7);
+        }
+        assert_eq!(h.pawn_history.data.last().unwrap()[0][0].get(), -1340);
     }
 
     #[test]

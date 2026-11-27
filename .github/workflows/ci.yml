@@ -26,14 +26,17 @@ jobs:
       matrix:
         include:
           - name: linux x86-64-v3
+            artifact: linux-x86-64-v3
             os: ubuntu-latest
             rustflags: "-C target-cpu=x86-64-v3"
             features: ""
           - name: linux x86-64 baseline
+            artifact: linux-x86-64-baseline
             os: ubuntu-latest
             rustflags: ""
             features: ""
           - name: windows x86-64-v3
+            artifact: windows-x86-64-v3
             os: windows-latest
             rustflags: "-C target-cpu=x86-64-v3"
             features: ""
@@ -46,6 +49,7 @@ jobs:
           # Default Apple Silicon build: dotprod is a target feature there, so
           # no Cargo feature is needed (the aarch64 Linux jobs cover the feature).
           - name: macOS arm64 dotprod
+            artifact: macos-arm64-dotprod
             os: macos-latest
             rustflags: ""
             features: ""
@@ -59,6 +63,11 @@ jobs:
         run: |
           source config/upstream.env
           printf '%s\n' "STOCKFISH_REVISION=$STOCKFISH_REVISION" "STOCKCRAB_NETWORK=$STOCKCRAB_NETWORK" "BENCH_NODES=$BENCH_NODES" >> "$GITHUB_ENV"
+      - name: Check README upstream pin
+        shell: bash
+        run: |
+          grep -F "$STOCKFISH_REVISION" README.md
+          grep -F "$STOCKCRAB_NETWORK" README.md
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
       - name: Cache NNUE network
@@ -82,7 +91,21 @@ jobs:
           n=$(awk '/Nodes searched/{print $NF}' bench.log)
           [ "$n" = "$BENCH_NODES" ] || { echo "bench nodes $n != $BENCH_NODES"; exit 1; }
       - name: Test
-        run: cargo test --release ${{ matrix.features }}
+        run: cargo test --release ${{ matrix.features }} -- --test-threads=1
+      - uses: actions/setup-python@v5
+        if: matrix.artifact != ''
+        with:
+          python-version: "3.12"
+      - name: Package binary
+        if: matrix.artifact != ''
+        shell: bash
+        run: python scripts/package_binary.py "${{ matrix.artifact }}"
+      - uses: actions/upload-artifact@v4
+        if: matrix.artifact != ''
+        with:
+          name: stockcrab-${{ matrix.artifact }}
+          path: dist/*
+          if-no-files-found: error
       # std aborts on a double-closed or foreign file descriptor only with debug assertions,
       # which is what makes descriptor-ownership bugs in the macOS fd-passing path deterministic.
       - name: Library tests (debug profile)

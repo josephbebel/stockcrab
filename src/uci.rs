@@ -206,10 +206,9 @@ impl UciEngine {
             } else {
                 self.current_cmd = cmd.as_bytes().to_vec();
             }
-            crate::misc::log_message(&format!(
-                "<< {}",
-                String::from_utf8_lossy(&self.current_cmd)
-            ));
+            crate::misc::with_log_file(|file| {
+                let _ = writeln!(file, "<< {}", String::from_utf8_lossy(&self.current_cmd));
+            });
 
             let cmd_trimmed = trim_cpp_whitespace(&cmd);
             if cmd_trimmed.is_empty() && self.cli.argc <= 1 {
@@ -1081,9 +1080,11 @@ impl UciEngine {
         let mut stdout = io::stdout().lock();
         let _ = stdout.write_all(bytes);
         let _ = stdout.flush();
-        for line in String::from_utf8_lossy(bytes).lines() {
-            crate::misc::log_message(&format!(">> {line}"));
-        }
+        crate::misc::with_log_file(|file| {
+            for line in String::from_utf8_lossy(bytes).lines() {
+                let _ = writeln!(file, ">> {line}");
+            }
+        });
     }
 }
 

@@ -22,9 +22,7 @@
 //! Evaluation uses a single NNUE `Network` and `AccumulatorCaches`, matching C++ Eval::evaluate.
 
 use crate::position::Position;
-use crate::types::{
-    Color, PAWN_VALUE, PieceType, VALUE_TB_LOSS_IN_MAX_PLY, VALUE_TB_WIN_IN_MAX_PLY, Value,
-};
+use crate::types::{Color, PieceType, VALUE_TB_LOSS_IN_MAX_PLY, VALUE_TB_WIN_IN_MAX_PLY, Value};
 use crate::uci::UciEngine;
 // Re-export types needed by other modules (for use in search, engine, and thread modules).
 // `Networks` is a type alias for `Network`, kept so call sites that use the upstream name compile unchanged.
@@ -63,32 +61,12 @@ pub fn evaluate(
     scale_evaluation(nnue, pos)
 }
 
-/// Material-only evaluation from the side to move's point of view.
-/// Matches C++ `simple_eval` in evaluate.cpp.
-fn simple_eval(pos: &Position) -> i32 {
-    let c = pos.side_to_move();
-    PAWN_VALUE * (pos.count_of(c, PieceType::Pawn) - pos.count_of(!c, PieceType::Pawn))
-        + pos.non_pawn_material_of(c)
-        - pos.non_pawn_material_of(!c)
-}
-
 /// Applies material and rule50 scaling to the raw NNUE eval.
 /// Matches C++ `scale_evaluation` in evaluate.cpp.
 pub fn scale_evaluation(nnue: Value, pos: &Position) -> Value {
-    let se = simple_eval(pos);
+    let mut v = nnue;
 
-    // Normalize the raw evaluations to [-1024, 1024] to measure their correlation.
-    let se_norm = (se * 1024) / (se.abs() + 1024);
-    let nnue_norm = (nnue * 1024) / (nnue.abs() + 1024);
-    // When NNUE and material agree (positive correlation), the position is straightforward;
-    // otherwise (negative correlation) it involves complex compensation. In a representative
-    // sample, correl averages -1 or so, i.e. it is well-centered in [-2048, 2048].
-    let correl = (se_norm * nnue_norm) / 512;
-
-    // When winning, we boost easy positions, and vice versa
-    let mut v = nnue + nnue * correl / 65536;
-
-    // Scale the combined evaluation by total material
+    // Scale the evaluation by total material
     let material = 521 * pos.count(PieceType::Pawn) + pos.non_pawn_material();
     v += (material as i64 * v as i64 / 90649) as i32;
 
@@ -168,7 +146,7 @@ mod tests {
     #[test]
     fn test_eval_file_default_name() {
         // Matches EvalFileDefaultName in src/evaluate.h
-        assert_eq!(EVAL_FILE_DEFAULT_NAME, "nn-bddd9d57eb87.nnue");
+        assert_eq!(EVAL_FILE_DEFAULT_NAME, "nn-684d0e60e71d.nnue");
     }
 
     #[test]
@@ -178,7 +156,7 @@ mod tests {
         let mut pos = Position::default();
         pos.set_fen("8/8/8/8/8/8/8/K6k w - - 100 1", false).unwrap(); // High rule50 count
 
-        // With kings only, material and correl are zero. Check the actual
+        // With kings only, material is zero. Check the actual
         // production entry point against upstream's /189 shuffling scale.
         assert_eq!(scale_evaluation(1000, &pos), 471);
         assert_eq!(scale_evaluation(-1000, &pos), -471);

@@ -18,9 +18,9 @@
 //!
 //! Focuses on correctness for key helpers, structured for performance and safety.
 
-use core::sync::atomic::{AtomicI64, Ordering};
-use std::fs::{self, OpenOptions};
-use std::io::{self, Write};
+use core::sync::atomic::{AtomicBool, AtomicI64, Ordering};
+use std::fs::{self, File, OpenOptions};
+use std::io::{self, LineWriter, Write};
 use std::sync::{Mutex, OnceLock};
 use std::time::{Instant, SystemTime, UNIX_EPOCH};
 
@@ -35,7 +35,7 @@ const VERSION: &str = env!("CARGO_PKG_VERSION");
 /// (`nogit` when built outside a repository).
 const GIT_HASH: &str = env!("STOCKCRAB_GIT_HASH");
 
-/// Upstream Stockfish commit this port is synced to (`config/upstream.env`),
+/// Upstream Stockfish commit this port is synced to (`docs/upstream-sync.md`),
 /// captured at compile time by `build.rs`.
 const UPSTREAM_REF: &str = env!("STOCKCRAB_UPSTREAM_REF");
 
@@ -1179,28 +1179,29 @@ impl SyncCout {
 // Logging functionality
 // ---------------------------------------------------------------------------
 
-static LOG_FILE: Mutex<Option<String>> = Mutex::new(None);
+struct LogFile {
+    filename: String,
+    writer: Option<LineWriter<File>>,
+}
 
-/// Enables logging to `filename`, truncating it and writing a start-time header. Later calls
-/// to `log_message` append to it.
+static LOG_FILE: Mutex<Option<LogFile>> = Mutex::new(None);
+static LOG_ENABLED: AtomicBool = AtomicBool::new(false);
+
+/// Enables logging to `filename`, truncating it and writing a start-time header.
 pub fn start_logger(filename: &str) {
     let mut log_file = LOG_FILE.lock().unwrap();
     if filename.is_empty() {
+        LOG_ENABLED.store(false, Ordering::Relaxed);
         *log_file = None;
         return;
     }
-    if log_file.as_deref() == Some(filename) {
+    if log_file
+        .as_ref()
+        .is_some_and(|log| log.filename == filename)
+    {
         return;
     }
-    *log_file = Some(filename.to_string());
-
-    // Create or truncate the log file
-    if let Ok(mut file) = OpenOptions::new()
-        .create(true)
-        .write(true)
-        .truncate(true)
-        .open(filename)
-    {
+    if let Ok(mut file) = File::create(filename) {
         writeln!(
             file,
             "Stockcrab logging started at {}",
@@ -1210,16 +1211,41 @@ pub fn start_logger(filename: &str) {
         )
         .ok();
     }
+    *log_file = Some(LogFile {
+        filename: filename.to_owned(),
+        writer: None,
+    });
+    LOG_ENABLED.store(true, Ordering::Relaxed);
 }
 
-/// Log a message to the log file if logging is enabled
-pub fn log_message(msg: &str) {
-    let log_file = LOG_FILE.lock().unwrap();
-    if let Some(ref filename) = *log_file {
-        if let Ok(mut file) = OpenOptions::new().create(true).append(true).open(filename) {
-            writeln!(file, "{}", msg).ok();
+/// Checks the flag before constructing log records. The mutex protects both the
+/// file handle and the choice of destination when an option changes.
+pub(crate) fn with_log_file(write: impl FnOnce(&mut LineWriter<File>)) {
+    if !LOG_ENABLED.load(Ordering::Relaxed) {
+        return;
+    }
+    let mut log_file = LOG_FILE.lock().unwrap();
+    if let Some(log) = log_file.as_mut() {
+        if log.writer.is_none() {
+            // Keep append semantics for shared logs and retry if the path was unavailable.
+            log.writer = OpenOptions::new()
+                .create(true)
+                .append(true)
+                .open(&log.filename)
+                .ok()
+                .map(LineWriter::new);
+        }
+        if let Some(file) = &mut log.writer {
+            write(file);
         }
     }
+}
+
+/// Log a message to the log file if logging is enabled.
+pub fn log_message(msg: &str) {
+    with_log_file(|file| {
+        let _ = writeln!(file, "{msg}");
+    });
 }
 
 // ---------------------------------------------------------------------------
